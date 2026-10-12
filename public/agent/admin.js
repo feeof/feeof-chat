@@ -2,6 +2,7 @@ import { h, clear, formatDateTime, formatDuration } from '/shared/dom.js';
 import { icon } from '/shared/icons.js';
 import { get, post, put, patch, del } from './api.js';
 import { state, on, emit } from './state.js';
+import { aiConnectionCard, PROVIDER_LABELS } from './ai-connection.js';
 import {
   avatar,
   button,
@@ -623,14 +624,16 @@ export class SettingsView {
     };
     inputs.ai_mode.value = s.ai_mode;
     const aiHint = h('span', { class: 'field-hint' });
-    get('/api/admin/ai/status')
-      .then(({ status }) => {
-        aiHint.textContent = status.configured
-          ? `已检测到 API Key，使用模型 ${status.model}。回答内容来自「知识库」中的条目。`
-          : '服务器未设置 ANTHROPIC_API_KEY 环境变量，开启后 AI 暂不会接待访客。';
-        aiHint.classList.toggle('warn', !status.configured);
-      })
-      .catch(() => {});
+    const refreshAiHint = () =>
+      get('/api/admin/ai/status')
+        .then(({ status }) => {
+          aiHint.textContent = status.configured
+            ? `将使用 ${PROVIDER_LABELS[status.provider]} 接口的 ${status.model} 模型回答，回答内容来自「知识库」中的条目。`
+            : '还没有配置 AI 接口：请在「AI 接口」中填写 API Key 和模型名称，否则开启后 AI 不会接待访客。';
+          aiHint.classList.toggle('warn', !status.configured);
+        })
+        .catch(() => {});
+    refreshAiHint();
     const form = h(
       'form',
       { class: 'card form settings-form' },
@@ -703,6 +706,9 @@ export class SettingsView {
       ),
       h('p', { class: 'field-hint' }, '可选属性：data-position="left" 左侧显示；data-name / data-email 传入已登录用户信息；也可调用 window.FeeofChat.open() 打开窗口。'),
     );
-    clear(this.body, h('div', { class: 'settings-grid' }, form, embed));
+    clear(
+      this.body,
+      h('div', { class: 'settings-grid' }, form, h('div', { class: 'settings-side' }, aiConnectionCard({ onSaved: refreshAiHint }), embed)),
+    );
   }
 }

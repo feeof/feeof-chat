@@ -38,6 +38,10 @@ const CONVERSATION_COLUMNS = [
   'rating', 'rating_comment', 'agent_unread', 'handoff_at', 'handoff_reason',
 ];
 const KB_COLUMNS = ['title', 'content', 'enabled'];
+// AI connection settings live in the settings table under their own prefix so
+// they never appear in getSettings(), which every agent can read (the API key is secret).
+const AI_CONNECTION_PREFIX = 'ai_connection.';
+const AI_CONNECTION_FIELDS = ['provider', 'base_url', 'api_key', 'model', 'effort', 'vision'];
 
 function escapeLike(text) {
   return text.replace(/[\\%_]/g, (ch) => `\\${ch}`);
@@ -53,6 +57,7 @@ class Store {
     this.db = db;
     this.statements = new Map();
     this.settingsCache = null;
+    this.aiConnectionCache = null;
     // Bumped on every knowledge base change so derived indexes know to rebuild.
     this.kbVersion = 0;
   }
@@ -116,6 +121,39 @@ class Store {
       }
     });
     return this.getSettings();
+  }
+
+  /** AI connection values saved by an admin; fields never saved are absent. */
+  getAiConnection() {
+    if (!this.aiConnectionCache) {
+      const stored = {};
+      for (const row of this.all('SELECT key, value FROM settings WHERE substr(key, 1, ?) = ?', AI_CONNECTION_PREFIX.length, AI_CONNECTION_PREFIX)) {
+        const field = row.key.slice(AI_CONNECTION_PREFIX.length);
+        if (AI_CONNECTION_FIELDS.includes(field)) stored[field] = JSON.parse(row.value);
+      }
+      this.aiConnectionCache = Object.freeze(stored);
+    }
+    return this.aiConnectionCache;
+  }
+
+  /** `null` removes a saved value (falling back to the environment default). */
+  updateAiConnection(patch) {
+    this.aiConnectionCache = null;
+    this.tx(() => {
+      for (const [field, value] of Object.entries(patch)) {
+        if (!AI_CONNECTION_FIELDS.includes(field) || value === undefined) continue;
+        const key = AI_CONNECTION_PREFIX + field;
+        if (value === null) this.run('DELETE FROM settings WHERE key = ?', key);
+        else {
+          this.run(
+            'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+            key,
+            JSON.stringify(value),
+          );
+        }
+      }
+    });
+    return this.getAiConnection();
   }
 
   // ---- users (agents & admins) ----
