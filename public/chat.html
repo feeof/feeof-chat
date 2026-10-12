@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>在线客服</title>
+    <link rel="stylesheet" href="/chat.css" />
+  </head>
+  <body>
+    <div class="chat" id="chat">
+      <header class="chat-header">
+        <div class="chat-title">
+          <span class="chat-logo" id="chat-logo"></span>
+          <div>
+            <div class="chat-name" id="site-name">在线客服</div>
+            <div class="chat-status"><span class="status-dot" id="status-dot"></span><span id="status-text">连接中…</span></div>
+          </div>
+        </div>
+        <div class="chat-actions" id="chat-actions"></div>
+      </header>
+
+      <form class="profile-panel" id="profile-panel" hidden>
+        <p class="profile-tip">留下联系方式，客服不在线时也能及时联系您</p>
+        <input name="name" maxlength="50" placeholder="您的称呼" autocomplete="name" />
+        <input name="phone" maxlength="30" placeholder="手机号" autocomplete="tel" inputmode="tel" />
+        <input name="email" maxlength="100" placeholder="邮箱" autocomplete="email" inputmode="email" />
+        <div class="profile-buttons">
+          <button type="button" class="btn-text" id="profile-cancel">取消</button>
+          <button type="submit" class="btn-primary">保存</button>
+        </div>
+      </form>
+
+      <main class="messages" id="messages" aria-live="polite"></main>
+
+      <div class="typing" id="typing" hidden><span></span><span></span><span></span> 客服正在输入</div>
+
+      <section class="rating" id="rating" hidden></section>
+
+      <footer class="composer">
+        <button type="button" class="icon-btn" id="btn-image" title="发送图片" aria-label="发送图片"></button>
+        <input type="file" id="file-input" accept="image/png,image/jpeg,image/gif,image/webp" hidden />
+        <textarea id="input" rows="1" placeholder="请输入您想咨询的问题…" aria-label="消息内容"></textarea>
+        <button type="button" class="send-btn" id="btn-send" aria-label="发送"></button>
+      </footer>
+    </div>
+    <script src="/socket.io/socket.io.js"></script>
+    <script type="module" src="/chat.js"></script>
+  </body>
+</html>
