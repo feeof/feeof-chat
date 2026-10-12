@@ -10,6 +10,14 @@ const DEFAULT_SETTINGS = {
   theme_color: '#2563eb',
   auto_assign: true,
   auto_close_minutes: 30,
+  // AI customer service
+  ai_enabled: false,
+  // 'always': AI answers every new conversation first;
+  // 'offline': AI answers only when no human agent can take the conversation.
+  ai_mode: 'always',
+  ai_name: '智能客服',
+  ai_instructions: '',
+  ai_handoff_message: '正在为您转接人工客服，请稍候…',
 };
 
 const CONVERSATION_SELECT = `
@@ -27,8 +35,9 @@ const USER_COLUMNS = ['display_name', 'password_hash', 'role', 'status', 'max_co
 const VISITOR_COLUMNS = ['name', 'email', 'phone', 'note', 'ip', 'user_agent', 'page_url', 'page_title', 'referrer', 'last_seen_at'];
 const CONVERSATION_COLUMNS = [
   'agent_id', 'status', 'assigned_at', 'first_response_at', 'closed_at', 'closed_by',
-  'rating', 'rating_comment', 'agent_unread',
+  'rating', 'rating_comment', 'agent_unread', 'handoff_at', 'handoff_reason',
 ];
+const KB_COLUMNS = ['title', 'content', 'enabled'];
 
 function escapeLike(text) {
   return text.replace(/[\\%_]/g, (ch) => `\\${ch}`);
@@ -43,6 +52,9 @@ class Store {
   constructor(db) {
     this.db = db;
     this.statements = new Map();
+    this.settingsCache = null;
+    // Bumped on every knowledge base change so derived indexes know to rebuild.
+    this.kbVersion = 0;
   }
 
   prepare(sql) {
@@ -81,14 +93,18 @@ class Store {
   // ---- settings ----
 
   getSettings() {
-    const settings = { ...DEFAULT_SETTINGS };
-    for (const row of this.all('SELECT key, value FROM settings')) {
-      if (row.key in DEFAULT_SETTINGS) settings[row.key] = JSON.parse(row.value);
+    if (!this.settingsCache) {
+      const settings = { ...DEFAULT_SETTINGS };
+      for (const row of this.all('SELECT key, value FROM settings')) {
+        if (row.key in DEFAULT_SETTINGS) settings[row.key] = JSON.parse(row.value);
+      }
+      this.settingsCache = Object.freeze(settings);
     }
-    return settings;
+    return this.settingsCache;
   }
 
   updateSettings(patch) {
+    this.settingsCache = null;
     this.tx(() => {
       for (const [key, value] of Object.entries(patch)) {
         if (!(key in DEFAULT_SETTINGS) || value === undefined) continue;
@@ -220,11 +236,12 @@ class Store {
     return this.get(`${CONVERSATION_SELECT} WHERE c.visitor_id = ? ORDER BY c.id DESC LIMIT 1`, visitorId);
   }
 
-  createConversation(visitorId, now = Date.now()) {
+  createConversation(visitorId, now = Date.now(), status = 'waiting') {
     const { lastInsertRowid } = this.run(
       `INSERT INTO conversations (visitor_id, status, created_at, last_message_at)
-       VALUES (?, 'waiting', ?, ?)`,
+       VALUES (?, ?, ?, ?)`,
       visitorId,
+      status,
       now,
       now,
     );
@@ -247,8 +264,13 @@ class Store {
     return this.all(`${CONVERSATION_SELECT} WHERE c.status = 'active' AND c.agent_id = ?`, agentId);
   }
 
-  listIdleActiveConversations(cutoff) {
-    return this.all(`${CONVERSATION_SELECT} WHERE c.status = 'active' AND c.last_message_at < ?`, cutoff);
+  /** Conversations someone is serving (an agent or the AI) that went quiet. */
+  listIdleConversations(cutoff) {
+    return this.all(`${CONVERSATION_SELECT} WHERE c.status IN ('active', 'bot') AND c.last_message_at < ?`, cutoff);
+  }
+
+  listBotConversations() {
+    return this.all(`${CONVERSATION_SELECT} WHERE c.status = 'bot'`);
   }
 
   /**
@@ -381,6 +403,60 @@ class Store {
     return this.run('DELETE FROM quick_replies WHERE id = ?', id).changes > 0;
   }
 
+  // ---- knowledge base ----
+
+  listKbArticles({ q, limit = 50, offset = 0 } = {}) {
+    const where = q ? `WHERE title LIKE ? ESCAPE '\\' OR content LIKE ? ESCAPE '\\'` : '';
+    const params = q ? [`%${escapeLike(q)}%`, `%${escapeLike(q)}%`] : [];
+    return {
+      articles: this.all(`SELECT * FROM kb_articles ${where} ORDER BY id DESC LIMIT ? OFFSET ?`, ...params, limit, offset),
+      total: this.get(`SELECT COUNT(*) AS n FROM kb_articles ${where}`, ...params).n,
+    };
+  }
+
+  listEnabledKbArticles() {
+    return this.all('SELECT * FROM kb_articles WHERE enabled = 1 ORDER BY id');
+  }
+
+  getKbArticle(id) {
+    return this.get('SELECT * FROM kb_articles WHERE id = ?', id);
+  }
+
+  createKbArticles(list) {
+    const now = Date.now();
+    const ids = this.tx(() =>
+      list.map(({ title, content, enabled = 1 }) =>
+        Number(
+          this.run(
+            'INSERT INTO kb_articles (title, content, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
+            title,
+            content,
+            enabled ? 1 : 0,
+            now,
+            now,
+          ).lastInsertRowid,
+        ),
+      ),
+    );
+    this.kbVersion += 1;
+    return ids.map((id) => this.getKbArticle(id));
+  }
+
+  updateKbArticle(id, fields) {
+    const changes = { ...fields };
+    if (changes.enabled !== undefined) changes.enabled = changes.enabled ? 1 : 0;
+    this.updateRow('kb_articles', KB_COLUMNS, id, changes);
+    this.run('UPDATE kb_articles SET updated_at = ? WHERE id = ?', Date.now(), id);
+    this.kbVersion += 1;
+    return this.getKbArticle(id);
+  }
+
+  deleteKbArticle(id) {
+    const deleted = this.run('DELETE FROM kb_articles WHERE id = ?', id).changes > 0;
+    if (deleted) this.kbVersion += 1;
+    return deleted;
+  }
+
   // ---- statistics ----
 
   stats(from, to) {
@@ -389,13 +465,22 @@ class Store {
          COUNT(*) AS conversations,
          COUNT(DISTINCT visitor_id) AS visitors,
          COALESCE(SUM(status = 'closed'), 0) AS closed,
-         COALESCE(SUM(first_response_at IS NULL), 0) AS unanswered,
+         COALESCE(SUM(first_response_at IS NULL AND NOT EXISTS (
+           SELECT 1 FROM messages m WHERE m.conversation_id = c.id AND m.sender_type = 'bot'
+         )), 0) AS unanswered,
+         COALESCE(SUM(EXISTS (
+           SELECT 1 FROM messages m WHERE m.conversation_id = c.id AND m.sender_type = 'bot'
+         )), 0) AS ai_conversations,
+         COALESCE(SUM(status = 'closed' AND handoff_at IS NULL AND EXISTS (
+           SELECT 1 FROM messages m WHERE m.conversation_id = c.id AND m.sender_type = 'bot'
+         )), 0) AS ai_resolved,
+         COUNT(handoff_at) AS handoffs,
          AVG(first_response_at - created_at) AS avg_first_response_ms,
          AVG(CASE WHEN closed_at IS NOT NULL AND assigned_at IS NOT NULL THEN closed_at - assigned_at END) AS avg_duration_ms,
          AVG(rating) AS avg_rating,
          COUNT(rating) AS rated,
          COALESCE(SUM(rating >= 4), 0) AS satisfied
-       FROM conversations WHERE created_at >= ? AND created_at < ?`,
+       FROM conversations c WHERE created_at >= ? AND created_at < ?`,
       from,
       to,
     );
@@ -406,7 +491,8 @@ class Store {
       to,
     ).n;
     const current = this.get(
-      `SELECT COALESCE(SUM(status = 'waiting'), 0) AS waiting, COALESCE(SUM(status = 'active'), 0) AS active
+      `SELECT COALESCE(SUM(status = 'waiting'), 0) AS waiting, COALESCE(SUM(status = 'active'), 0) AS active,
+         COALESCE(SUM(status = 'bot'), 0) AS bot
        FROM conversations WHERE status != 'closed'`,
     );
     const agents = this.all(

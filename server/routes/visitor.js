@@ -55,11 +55,15 @@ function visitorRoutes({ store, service, config }) {
 
   function widgetConfig() {
     const settings = store.getSettings();
+    const ai = service.aiReady(settings);
     return {
       site_name: settings.site_name,
       welcome_message: settings.welcome_message,
       theme_color: settings.theme_color,
-      online: service.isServiceOnline(),
+      // With the AI on, someone always answers.
+      online: ai || service.isServiceOnline(),
+      ai_enabled: ai,
+      ai_name: settings.ai_name,
       max_message_length: config.maxMessageLength,
     };
   }
@@ -125,6 +129,11 @@ function visitorRoutes({ store, service, config }) {
     if (!messageLimiter.hit(String(req.visitor.id))) throw new HttpError(429, '发送太频繁了，请稍后再试');
     const message = service.sendVisitorMessage(req.visitor, req.body);
     res.status(201).json({ message: service.messageView(message) });
+  });
+
+  router.post('/visitor/handoff', (req, res) => {
+    const conv = service.handoffByVisitor(req.visitor);
+    res.json({ conversation: service.visitorConversationView(conv) });
   });
 
   router.post('/visitor/close', (req, res) => {

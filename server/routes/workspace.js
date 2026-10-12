@@ -5,7 +5,9 @@ const { badRequest, readString, readInt, readId } = require('../util');
 const { agentAuth } = require('./middleware');
 const { normalizeVisitorProfile } = require('./visitor');
 
-const STATUSES = ['waiting', 'active', 'closed'];
+const STATUSES = ['bot', 'waiting', 'active', 'closed'];
+// Conversations every agent can see, regardless of who is serving them.
+const SHARED_STATUSES = ['bot', 'waiting'];
 
 /** Endpoints shared by every logged-in agent. */
 function workspaceRoutes({ store, service }) {
@@ -22,8 +24,8 @@ function workspaceRoutes({ store, service }) {
       limit: readInt(req.query.limit, { field: 'limit', min: 1, max: 200 }) ?? 50,
       offset: readInt(req.query.offset, { field: 'offset', min: 0 }) ?? 0,
     };
-    // Agents only see their own conversations outside the shared queue.
-    if (status !== 'waiting') {
+    // Agents only see their own conversations outside the shared queue and AI conversations.
+    if (!SHARED_STATUSES.includes(status)) {
       if (user.role !== 'admin' || req.query.mine === '1') options.agentId = user.id;
       else if (req.query.agent_id) options.agentId = readId(req.query.agent_id);
     }
