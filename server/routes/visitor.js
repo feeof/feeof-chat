@@ -18,6 +18,25 @@ function normalizeVisitorProfile(body) {
   return { name, email, phone };
 }
 
+/**
+ * Page metadata comes from whatever site embeds the widget, so it is
+ * truncated or dropped instead of rejected - a long page title must not
+ * stop a visitor from chatting.
+ */
+function lenientString(value, max) {
+  return typeof value === 'string' && value.trim() ? value.trim().slice(0, max) : undefined;
+}
+
+function lenientProfile(body) {
+  const email = lenientString(body.email, 100);
+  const phone = lenientString(body.phone, 30);
+  return {
+    name: lenientString(body.name, 50),
+    email: email && EMAIL_RE.test(email) ? email : undefined,
+    phone: phone && PHONE_RE.test(phone) ? phone : undefined,
+  };
+}
+
 /** Keeps only http(s) URLs so they are safe to render as links. */
 function safeUrl(value) {
   if (typeof value !== 'string' || value.length > 1000) return undefined;
@@ -31,7 +50,7 @@ function safeUrl(value) {
 
 function visitorRoutes({ store, service, config }) {
   const router = express.Router();
-  const newVisitorLimiter = new RateLimiter({ limit: 30, windowMs: 60 * 1000 });
+  const newVisitorLimiter = new RateLimiter({ limit: 60, windowMs: 60 * 1000 });
   const messageLimiter = new RateLimiter({ limit: 20, windowMs: 30 * 1000 });
 
   function widgetConfig() {
@@ -50,6 +69,8 @@ function visitorRoutes({ store, service, config }) {
   }
 
   router.get('/widget/config', (req, res) => {
+    // Read by widget.js from the host site, so it must be readable cross-origin.
+    res.set('Access-Control-Allow-Origin', '*');
     res.json({ config: widgetConfig() });
   });
 
@@ -57,11 +78,11 @@ function visitorRoutes({ store, service, config }) {
   router.post('/visitor/session', (req, res) => {
     const body = req.body;
     const fields = {
-      ...normalizeVisitorProfile(body),
+      ...lenientProfile(body),
       ip: req.ip,
       user_agent: (req.get('user-agent') || '').slice(0, 500),
       page_url: safeUrl(body.page_url),
-      page_title: readString(body.page_title, { field: '页面标题', max: 200 }),
+      page_title: lenientString(body.page_title, 200),
       referrer: safeUrl(body.referrer),
       last_seen_at: Date.now(),
     };

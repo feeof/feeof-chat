@@ -149,6 +149,17 @@ test('visitor sessions are resumable and sanitize page info', async () => {
   assert.equal(noteRes.data.visitor.phone, null);
 });
 
+test('visitor session tolerates odd page metadata from the host site', async () => {
+  const res = await srv.newVisitor({ page_title: 'T'.repeat(500), email: 'not-an-email', name: 'N'.repeat(80) });
+  assert.equal(res.visitor.email, null);
+  assert.equal(res.visitor.name.length, 50);
+  await srv.request('POST', '/api/visitor/messages', { visitorToken: res.token, body: { content: 'hi' } });
+  const conv = (await srv.request('GET', '/api/conversations?status=waiting', { token: admin.token })).data.conversations
+    .find((c) => c.visitor_id === res.visitor.id);
+  const detail = await srv.request('GET', `/api/conversations/${conv.id}`, { token: admin.token });
+  assert.equal(detail.data.visitor.page_title.length, 200);
+});
+
 test('message validation', async () => {
   const v = await srv.newVisitor();
   const send = (body) => srv.request('POST', '/api/visitor/messages', { visitorToken: v.token, body });
@@ -272,4 +283,23 @@ test('sockets reject missing or invalid credentials', async () => {
   await assert.rejects(anon.ready, /unauthorized/);
   const bad = srv.socket({ token: 'invalid' });
   await assert.rejects(bad.ready, /unauthorized/);
+});
+
+test('static pages: only the visitor chat page may be framed by other sites', async () => {
+  const chat = await fetch(`${srv.base}/chat.html`);
+  assert.equal(chat.status, 200);
+  assert.match(chat.headers.get('content-security-policy'), /frame-ancestors \*/);
+  assert.equal(chat.headers.get('x-frame-options'), null);
+
+  const agent = await fetch(`${srv.base}/agent/`);
+  assert.equal(agent.status, 200);
+  assert.match(agent.headers.get('content-security-policy'), /frame-ancestors 'self'/);
+  assert.equal(agent.headers.get('x-frame-options'), 'SAMEORIGIN');
+
+  const widget = await fetch(`${srv.base}/widget.js`);
+  assert.equal(widget.status, 200);
+  const config = await fetch(`${srv.base}/api/widget/config`);
+  assert.equal(config.headers.get('access-control-allow-origin'), '*');
+  const io = await fetch(`${srv.base}/socket.io/socket.io.js`);
+  assert.equal(io.status, 200);
 });

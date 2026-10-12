@@ -58,11 +58,16 @@ function setupRealtime(io, { store, service, presence }) {
     socket.join(['visitors', `visitor:${visitorId}`]);
     const firstConnection = presence.addVisitor(visitorId);
 
-    let lastTyping = 0;
+    // Clients already throttle typing events; this only caps abusive bursts.
+    let typingWindow = 0;
+    let typingCount = 0;
     socket.on('typing', safe(() => {
       const now = Date.now();
-      if (now - lastTyping < 1000) return;
-      lastTyping = now;
+      if (now - typingWindow > 2000) {
+        typingWindow = now;
+        typingCount = 0;
+      }
+      if (++typingCount > 4) return;
       service.visitorTyping(visitorId);
     }));
 
