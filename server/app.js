@@ -87,6 +87,8 @@ function createApp({ aiClient, ...overrides } = {}) {
   app.use(securityHeaders(config));
 
   const deps = { store, service, config, ai, knowledge };
+  // Knowledge base imports carry whole documents; everything else stays small.
+  app.use('/api/admin/kb', express.json({ limit: '5mb' }));
   app.use('/api', express.json({ limit: '100kb' }), (req, res, next) => {
     if (req.body === undefined) req.body = {};
     next();

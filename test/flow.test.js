@@ -145,6 +145,9 @@ test('full conversation lifecycle: queue, auto-assign, chat, transfer, close, ra
   assert.equal(stats.data.overview.avg_rating, 5);
   assert.equal(stats.data.daily.length, 7);
   assert.equal(stats.data.daily.at(-1).conversations, 2);
+  const bobStats = stats.data.agents.find((a) => a.id === bob.user.id);
+  assert.equal(bobStats.status, 'online');
+  assert.equal(bobStats.conversations, 1);
 });
 
 test('routing respects capacity and drains the queue when an agent frees up', async (t) => {

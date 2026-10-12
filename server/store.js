@@ -269,6 +269,13 @@ class Store {
     return this.all(`${CONVERSATION_SELECT} WHERE c.status IN ('active', 'bot') AND c.last_message_at < ?`, cutoff);
   }
 
+  countBotMessages(conversationId) {
+    return this.get(
+      "SELECT COUNT(*) AS n FROM messages WHERE conversation_id = ? AND sender_type = 'bot'",
+      conversationId,
+    ).n;
+  }
+
   listBotConversations() {
     return this.all(`${CONVERSATION_SELECT} WHERE c.status = 'bot'`);
   }
@@ -496,7 +503,7 @@ class Store {
        FROM conversations WHERE status != 'closed'`,
     );
     const agents = this.all(
-      `SELECT u.id, u.display_name, u.role, u.disabled,
+      `SELECT u.id, u.display_name, u.role, u.status, u.disabled,
          COUNT(c.id) AS conversations,
          COALESCE(SUM(c.status = 'closed'), 0) AS closed,
          AVG(c.first_response_at - c.created_at) AS avg_first_response_ms,

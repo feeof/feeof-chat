@@ -60,8 +60,8 @@ function visitorRoutes({ store, service, config }) {
       site_name: settings.site_name,
       welcome_message: settings.welcome_message,
       theme_color: settings.theme_color,
-      // With the AI on, someone always answers.
-      online: ai || service.isServiceOnline(),
+      // Human agents only; `ai_enabled` says whether the AI answers when they are away.
+      online: service.isServiceOnline(),
       ai_enabled: ai,
       ai_name: settings.ai_name,
       max_message_length: config.maxMessageLength,
