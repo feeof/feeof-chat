@@ -30,10 +30,19 @@ function loadConfig(overrides = {}) {
     maintenanceIntervalMs: 60 * 1000,
     ...overrides,
     // AI customer service (Claude). Credentials come from ANTHROPIC_API_KEY.
+    // Connection settings here are defaults; the admin UI (settings table) overrides them.
     ai: {
-      model: process.env.AI_MODEL || 'claude-opus-5-5',
-      // Chat replies are latency-sensitive; raise to 'medium' if answers need more reasoning.
-      effort: EFFORTS.includes(process.env.AI_EFFORT) ? process.env.AI_EFFORT : 'low',
+      provider: process.env.AI_PROVIDER === 'openai' ? 'openai' : 'anthropic',
+      baseUrl: process.env.AI_BASE_URL || '',
+      apiKey: process.env.AI_API_KEY || '',
+      // Empty means the provider's default (claude-opus-5-5 for Anthropic).
+      model: process.env.AI_MODEL || '',
+      // Anthropic only. Chat replies are latency-sensitive; raise to 'medium'
+      // if answers need more reasoning. 'none' leaves it to the model default.
+      effort:
+        process.env.AI_EFFORT === 'none' ? '' : EFFORTS.includes(process.env.AI_EFFORT) ? process.env.AI_EFFORT : 'low',
+      // OpenAI-compatible only: whether the model accepts image input.
+      vision: envFlag(process.env.AI_VISION),
       // Thinking counts toward this limit as well as the reply.
       maxTokens: Number(process.env.AI_MAX_TOKENS) || 8000,
       // Knowledge bases up to this size are sent whole (and prompt-cached);
@@ -47,4 +56,4 @@ function loadConfig(overrides = {}) {
   };
 }
 
-module.exports = { loadConfig };
+module.exports = { loadConfig, EFFORTS };

@@ -2,6 +2,8 @@
 
 const express = require('express');
 const { HttpError, badRequest, notFound, readString, readInt, readId, RateLimiter } = require('../util');
+const { PROVIDERS } = require('../ai/assistant');
+const { EFFORTS } = require('../config');
 
 const MAX_IMPORT = 500;
 
@@ -78,10 +80,68 @@ function knowledgeRoutes({ store, ai, knowledge }) {
     res.json({ status: ai.status() });
   });
 
+  // ---- AI connection: interface type, API URL, API key, model ----
+
+  router.get('/ai/connection', (req, res) => {
+    res.json({ connection: ai.connectionView() });
+  });
+
+  router.put('/ai/connection', (req, res) => {
+    const body = req.body;
+    const patch = {};
+    if (body.provider !== undefined) {
+      if (!PROVIDERS.includes(body.provider)) throw badRequest('接口类型无效');
+      patch.provider = body.provider;
+    }
+    if (body.base_url !== undefined) {
+      const url = readString(body.base_url, { field: 'API 地址', max: 500 });
+      if (url) {
+        let parsed;
+        try {
+          parsed = new URL(url);
+        } catch {
+          throw badRequest('API 地址格式不正确');
+        }
+        if (!['http:', 'https:'].includes(parsed.protocol)) throw badRequest('API 地址必须以 http:// 或 https:// 开头');
+      }
+      // An empty value means the interface type's official address.
+      patch.base_url = url ? url.replace(/\/+$/, '') : null;
+    }
+    if (body.model !== undefined) {
+      const model = readString(body.model, { field: '模型名称', max: 200 });
+      if (model && /\s/.test(model)) throw badRequest('模型名称不能包含空格');
+      patch.model = model || null;
+    }
+    if (body.effort !== undefined) {
+      if (body.effort !== '' && !EFFORTS.includes(body.effort)) throw badRequest('推理强度无效');
+      patch.effort = body.effort;
+    }
+    if (body.vision !== undefined) {
+      if (typeof body.vision !== 'boolean') throw badRequest('vision 必须是布尔值');
+      patch.vision = body.vision;
+    }
+    // The key is write-only: an empty value keeps the saved one, clear_api_key removes it.
+    const apiKey = readString(body.api_key, { field: 'API Key', max: 1000 });
+    if (apiKey) {
+      if (/\s/.test(apiKey)) throw badRequest('API Key 不能包含空格或换行');
+      patch.api_key = apiKey;
+    } else if (body.clear_api_key === true) {
+      patch.api_key = null;
+    }
+    store.updateAiConnection(patch);
+    res.json({ connection: ai.connectionView() });
+  });
+
+  router.post('/ai/ping', async (req, res) => {
+    if (!testLimiter.hit(String(req.user.id))) throw new HttpError(429, '测试太频繁了，请稍后再试');
+    if (!ai.isConfigured()) throw badRequest('请先填写模型名称和 API Key（或 API 地址）');
+    res.json({ result: await ai.ping() });
+  });
+
   // Asks the AI one question exactly as a visitor would (this calls the Claude API).
   router.post('/ai/test', async (req, res) => {
     const question = readString(req.body.question, { field: '问题', required: true, max: 2000 });
-    if (!ai.isConfigured()) throw badRequest('服务器未配置 ANTHROPIC_API_KEY，无法调用 AI');
+    if (!ai.isConfigured()) throw badRequest('AI 接口未配置：请在「设置 → AI 接口」中填写 API Key 和模型');
     if (!testLimiter.hit(String(req.user.id))) throw new HttpError(429, '测试太频繁了，请稍后再试');
     const history = [{ id: 0, sender_type: 'visitor', type: 'text', content: question }];
     const result = await ai.respond(history, store.getSettings());

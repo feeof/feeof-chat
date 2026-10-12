@@ -3,6 +3,7 @@ import { icon } from '/shared/icons.js';
 import { get, post, patch, del } from './api.js';
 import { state } from './state.js';
 import { button, iconButton, emptyState, toast, toastError, modal, confirmDialog, field } from './ui.js';
+import { PROVIDER_LABELS } from './ai-connection.js';
 
 const PAGE_SIZE = 30;
 const CHUNK_CHARS = 3000;
@@ -160,7 +161,12 @@ export class KnowledgeView {
         : `条目较多（超过 ${ai.full_knowledge_max_chars.toLocaleString()} 字），每次按问题检索最相关的条目`;
     const rows = [
       ['AI 客服', enabled ? '已开启' : h('span', null, '未开启 · ', h('a', { href: '#/settings' }, '去设置开启'))],
-      ['API Key', ai.configured ? `已配置 · 模型 ${ai.model}` : h('span', { class: 'text-warn' }, '未配置：请在服务器设置 ANTHROPIC_API_KEY 环境变量')],
+      [
+        'AI 接口',
+        ai.configured
+          ? `${PROVIDER_LABELS[ai.provider]} · ${ai.model} · ${ai.base_url}`
+          : h('span', { class: 'text-warn' }, '未配置：', h('a', { href: '#/settings' }, '在「设置 → AI 接口」中填写 API Key 和模型')),
+      ],
       ['知识库', `${ai.knowledge_articles} 条启用中，共 ${ai.knowledge_chars.toLocaleString()} 字`],
       ['检索方式', mode],
     ];
@@ -434,7 +440,7 @@ export class KnowledgeView {
       'aside',
       { class: 'card kb-try' },
       h('h3', null, '试一试'),
-      h('p', { class: 'page-tip' }, '用访客的口吻提问，检查 AI 的回答是否准确。「问 AI」会实际调用 Claude API。'),
+      h('p', { class: 'page-tip' }, '用访客的口吻提问，检查 AI 的回答是否准确。「问 AI」会实际调用 AI 接口。'),
       question,
       h('div', { class: 'form-actions start' }, previewBtn, askBtn),
       output,
