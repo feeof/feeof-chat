@@ -50,10 +50,15 @@ class RateLimiter {
     this.limit = limit;
     this.windowMs = windowMs;
     this.hits = new Map();
+    this.lastPrune = 0;
   }
 
   /** Records a hit and returns false when the key is over its limit. */
   hit(key, now = Date.now()) {
+    if (now - this.lastPrune >= this.windowMs) {
+      this.prune(now);
+      this.lastPrune = now;
+    }
     const entry = this.hits.get(key);
     if (!entry || now - entry.start >= this.windowMs) {
       this.hits.set(key, { start: now, count: 1 });
