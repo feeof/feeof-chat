@@ -1,6 +1,6 @@
 # Feeof 在线客服系统
 
-一个开箱即用的网页在线客服系统：一行代码把客服挂件嵌入你的网站，访客实时咨询，客服在工作台统一接待，管理员在后台管理客服、快捷回复和查看数据。
+一个开箱即用的网页在线客服系统：一行代码把客服挂件嵌入你的网站，访客实时咨询，客服在工作台统一接待，管理员在后台管理客服、快捷回复和查看数据。可选开启基于知识库的 **AI 智能客服**（Claude），先由 AI 回答常见问题，需要时无缝转人工。
 
 - **后端**：Node.js 22 + Express 5 + Socket.IO，数据存储使用 Node 内置的 SQLite（`node:sqlite`），无需安装数据库
 - **前端**：原生 JavaScript（ES Modules），无需构建，支持浅色 / 深色模式和手机端
@@ -26,6 +26,15 @@
 - 历史会话检索（访客、电话、邮箱、消息内容、会话编号）
 - 桌面通知 + 提示音，标题栏未读计数；在线 / 离开 / 离线状态切换
 - 断线自动重连并补齐期间的消息
+
+**AI 智能客服（可选）**
+
+- 根据后台维护的知识库自动回答访客问题，回答只依据知识库，不编造价格、政策等信息
+- 两种接待模式：AI 优先（所有新会话先由 AI 接待）或 AI 兜底（只在没有客服能接待时由 AI 接待）
+- 自动转人工：知识库没有答案、访客要求人工、退款投诉等需要人工处理的问题；访客也可以点「转人工」或直接发送“人工”
+- 客服可以在「AI 接待」标签实时查看 AI 的对话，随时一键接管；转人工时显示原因
+- 知识库管理：新增 / 编辑 / 停用条目，导入 Markdown / TXT 文件（按标题自动拆分），「试一试」直接测试 AI 回答
+- 访客发的截图也会交给 AI 理解；数据看板统计 AI 接待量、独立解决率和转人工次数
 
 **管理后台（管理员）**
 
@@ -59,6 +68,26 @@ ADMIN_PASSWORD='你的强密码' npm start
 
 体验完整流程：一个浏览器窗口登录客服工作台，另一个窗口（或无痕窗口）打开演示页点击“试试联系客服”。
 
+## 开启 AI 智能客服
+
+1. 在 [Claude Console](https://platform.claude.com/) 创建 API Key，启动服务时通过环境变量传入：
+
+   ```bash
+   ANTHROPIC_API_KEY='sk-ant-...' npm start
+   ```
+
+2. 用管理员登录工作台，在「知识库」中新增条目或导入文档。一条只写一个主题，标题写成访客会问的样子，内容写清楚规则、步骤和例外情况。
+3. 在「知识库」右侧的「试一试」中用访客的口吻提问，检查回答是否准确。
+4. 在「设置 → AI 智能客服」中勾选开启，选择接待模式，可以在「补充说明」里写上业务背景和语气要求。
+
+**工作方式**
+
+- 知识库不大时（默认 6 万字以内），每次提问都会把全部条目交给 AI，这部分内容使用了提示缓存（prompt caching），重复部分按缓存价格计费；知识库更大时改为按问题检索最相关的条目，AI 也可以自己换关键词再检索
+- AI 回答不了、访客要求人工、问题需要人工处理，或者调用 Claude API 出错时，会话都会转入人工排队，按正常规则分配给客服
+- 同一会话中访客连续发多条消息时，AI 会等所有消息到齐后一次性回答
+- 每个会话最多由 AI 回复 30 次（可配置），超过后转人工，避免异常会话持续消耗费用
+- 默认使用 `claude-opus-5-5` 模型和 `low` 推理强度（聊天场景响应更快），并开启了 Claude API 的服务端拒答回退（`fallbacks: "default"`）：当模型的安全分类器误拦截一个问题时，会自动由另一个模型作答
+
 ## 嵌入到你的网站
 
 把下面这行代码放到网页 `</body>` 之前：
@@ -88,6 +117,13 @@ ADMIN_PASSWORD='你的强密码' npm start
 | `ADMIN_PASSWORD` | 随机生成 | 初始管理员密码 |
 | `TRUST_PROXY` | 关闭 | 部署在 Nginx 等反向代理之后时设为 `1`，以便获取访客真实 IP |
 | `WIDGET_FRAME_ANCESTORS` | `*` | 允许嵌入聊天窗口的网站（CSP `frame-ancestors`），例如 `https://a.com https://b.com` |
+| `ANTHROPIC_API_KEY` | 无 | Claude API Key，未设置时 AI 客服不会启用 |
+| `AI_MODEL` | `claude-opus-5-5` | AI 使用的 Claude 模型 |
+| `AI_EFFORT` | `low` | 推理强度：`low` / `medium` / `high` / `xhigh` / `max`，越高回答越周全但越慢、越贵 |
+| `AI_MAX_TOKENS` | `8000` | 单次回复的最大 token 数（包含模型的思考过程） |
+| `AI_FULL_KB_MAX_CHARS` | `60000` | 知识库总字数不超过该值时全部交给 AI，超过则按问题检索 |
+| `AI_MAX_REPLIES` | `30` | 每个会话 AI 最多回复的次数，超过后转人工 |
+| `AI_FALLBACKS` | 开启 | 设为 `off` 关闭服务端拒答回退（通过不支持该参数的代理访问 API 时需要关闭） |
 
 ## 部署
 
@@ -137,7 +173,8 @@ server/
   store.js        SQLite 数据访问
   db.js           数据库初始化与迁移
   realtime.js     Socket.IO 连接与在线状态
-  routes/         REST 接口（auth、workspace、admin、visitor、upload）
+  ai/             AI 客服：assistant.js（调用 Claude、转人工）、knowledge.js（知识库检索）
+  routes/         REST 接口（auth、workspace、admin、knowledge、visitor、upload）
 public/
   widget.js       嵌入网站用的挂件脚本
   chat.html/js    访客聊天页面（挂件 iframe 内的页面）
@@ -159,6 +196,10 @@ test/             集成测试
 | POST | `/api/visitor/messages` | 访客发送消息 |
 | POST | `/api/uploads` | 上传图片（PNG / JPG / GIF / WebP，最大 5MB） |
 | GET | `/api/admin/stats?range=today\|7d\|30d` | 数据统计（管理员） |
+| GET / POST / PATCH / DELETE | `/api/admin/kb`、`/api/admin/kb/:id` | 知识库条目管理（管理员） |
+| POST | `/api/admin/kb/import` | 批量导入知识条目 |
+| POST | `/api/admin/ai/test` | 用一个问题测试 AI 回答（会调用 Claude API） |
+| POST | `/api/visitor/handoff` | 访客从 AI 转人工 |
 
 实时事件通过 Socket.IO 推送：`message`、`conversation:update`、`conversation`、`typing`、`agent:presence`、`service:status`。
 
@@ -170,6 +211,7 @@ test/             集成测试
 - 上传文件按文件头识别真实格式，只接受常见图片格式，并以 `nosniff` + 沙箱 CSP 返回
 - 客服工作台禁止被其他网站嵌入；只有访客聊天页允许被嵌入（可通过 `WIDGET_FRAME_ANCESTORS` 收紧）
 - 访客发消息、上传、创建身份均有频率限制
+- AI 的指令中要求它不执行访客消息里改变身份、忽略指令或泄露指令的要求；访客无法修改 AI 的系统指令和知识库
 
 ## License
 

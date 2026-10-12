@@ -17,6 +17,7 @@ import {
 } from './ui.js';
 import { ChatsView, HistoryView } from './chat.js';
 import { DashboardView, AgentsView, RepliesView, SettingsView } from './admin.js';
+import { KnowledgeView } from './knowledge.js';
 
 const root = document.getElementById('root');
 const BASE_TITLE = 'Feeof 客服工作台';
@@ -26,6 +27,7 @@ const ROUTES = {
   history: { label: '历史', icon: 'history', view: HistoryView },
   dashboard: { label: '看板', icon: 'chart', view: DashboardView, admin: true },
   agents: { label: '客服', icon: 'users', view: AgentsView, admin: true },
+  knowledge: { label: '知识库', icon: 'book', view: KnowledgeView, admin: true },
   replies: { label: '快捷回复', icon: 'zap', view: RepliesView, admin: true },
   settings: { label: '设置', icon: 'sliders', view: SettingsView, admin: true },
 };
@@ -103,7 +105,7 @@ function currentRoute() {
 function renderNav() {
   const active = currentRoute();
   const count = attentionCount();
-  clear(layout.nav, 
+  clear(layout.nav,
     Object.entries(ROUTES)
       .filter(([, route]) => !route.admin || isAdmin())
       .map(([key, route]) =>
@@ -249,7 +251,10 @@ async function logout() {
 // ---- realtime ----
 
 function notifyForConversation(conv, previous) {
-  if (conv.status === 'waiting' && !previous) {
+  if (conv.status === 'waiting' && previous && previous.status === 'bot') {
+    const reason = conv.handoff_reason ? `（${conv.handoff_reason}）` : '';
+    notifier.alert('访客需要人工服务', `${conv.visitor_name}${reason}`, () => (location.hash = '#/chats'));
+  } else if (conv.status === 'waiting' && !previous) {
     notifier.alert('新访客咨询', `${conv.visitor_name}：${conv.last_message_preview || ''}`, () => (location.hash = '#/chats'));
   } else if (conv.status === 'active' && isMine(conv) && (!previous || previous.agent_id !== state.me.id)) {
     notifier.alert('新会话已分配给你', `${conv.visitor_name}：${conv.last_message_preview || ''}`, () => (location.hash = '#/chats'));
@@ -265,13 +270,14 @@ function notifyForMessage(msg) {
 }
 
 async function syncWorkspace() {
-  const [waiting, active, agents] = await Promise.all([
+  const [bot, waiting, active, agents] = await Promise.all([
+    get('/api/conversations?status=bot&limit=200'),
     get('/api/conversations?status=waiting&limit=200'),
     get('/api/conversations?status=active&limit=200'),
     get('/api/agents'),
   ]);
   state.agents = new Map(agents.agents.map((a) => [a.id, a]));
-  setConversations([...waiting.conversations, ...active.conversations]);
+  setConversations([...bot.conversations, ...waiting.conversations, ...active.conversations]);
   emit('agents');
   renderNav();
 }

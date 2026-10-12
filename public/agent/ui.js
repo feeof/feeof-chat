@@ -2,7 +2,7 @@ import { h } from '/shared/dom.js';
 import { icon } from '/shared/icons.js';
 
 export const STATUS_LABEL = { online: '在线', away: '离开', offline: '离线' };
-export const CONVERSATION_STATUS = { waiting: '排队中', active: '进行中', closed: '已结束' };
+export const CONVERSATION_STATUS = { bot: 'AI 接待', waiting: '排队中', active: '进行中', closed: '已结束' };
 
 export function statusDot(status) {
   return h('span', { class: `dot dot-${status}`, title: STATUS_LABEL[status] || '' });

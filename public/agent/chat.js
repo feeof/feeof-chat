@@ -50,7 +50,11 @@ function conversationItem(conv, { selected, onSelect, showAgent }) {
   const showUnread = conv.status === 'waiting' || (conv.status === 'active' && isMine(conv));
   const unread = showUnread ? conv.agent_unread : 0;
   let meta = null;
-  if (conv.status === 'waiting') meta = `已等待 ${formatDuration(Date.now() - conv.created_at)}`;
+  if (conv.status === 'bot') meta = h('span', { class: 'ai-tag' }, 'AI 接待中');
+  else if (conv.status === 'waiting') {
+    const waited = `已等待 ${formatDuration(Date.now() - (conv.handoff_at || conv.created_at))}`;
+    meta = conv.handoff_reason ? `${waited} · 转人工：${conv.handoff_reason}` : waited;
+  }
   else if (conv.status === 'closed') meta = h('span', null, conv.agent_name ? `客服 ${conv.agent_name}` : '未接入', ' ', stars(conv.rating));
   else if (showAgent && !isMine(conv)) meta = `客服 ${conv.agent_name || '-'}`;
   return h(
@@ -405,13 +409,18 @@ export class ChatPanel {
   renderHeader() {
     const conv = this.conv;
     let subtitle;
-    if (conv.status === 'waiting') subtitle = `已等待 ${formatDuration(Date.now() - conv.created_at)}`;
+    if (conv.status === 'bot') subtitle = 'AI 智能客服正在接待';
+    else if (conv.status === 'waiting') {
+      subtitle = `已等待 ${formatDuration(Date.now() - (conv.handoff_at || conv.created_at))}`;
+      if (conv.handoff_reason) subtitle += ` · 转人工原因：${conv.handoff_reason}`;
+    }
     else if (conv.status === 'active') subtitle = `接待客服：${conv.agent_name || '-'}`;
     else subtitle = h('span', null, `${formatDateTime(conv.closed_at)} 结束`, ' ', stars(conv.rating));
 
     const actions = [];
-    if (conv.status === 'waiting') {
-      actions.push(button('接入', { variant: 'primary', iconName: 'check', onClick: () => this.accept() }));
+    if (conv.status === 'waiting' || conv.status === 'bot') {
+      const label = conv.status === 'bot' ? '接管' : '接入';
+      actions.push(button(label, { variant: 'primary', iconName: 'check', onClick: () => this.accept() }));
       if (isAdmin()) actions.push(button('分配', { iconName: 'transfer', onClick: () => openTransferDialog(this.conv) }));
       actions.push(button('结束', { iconName: 'power', onClick: () => this.close() }));
     } else if (conv.status === 'active' && (isMine(conv) || isAdmin())) {
@@ -419,7 +428,7 @@ export class ChatPanel {
       actions.push(button('结束', { iconName: 'power', onClick: () => this.close() }));
     }
 
-    clear(this.header, 
+    clear(this.header,
       this.onBack ? iconButton('back', { title: '返回列表', onClick: this.onBack, className: 'back-btn' }) : '',
       avatar(conv.visitor_name, { size: 36, online: conv.status === 'closed' ? undefined : conv.visitor_online }),
       h(
@@ -440,6 +449,7 @@ export class ChatPanel {
   footerModeFor(conv) {
     if (conv.status === 'closed') return 'closed';
     if (conv.status === 'waiting') return 'waiting';
+    if (conv.status === 'bot') return 'bot';
     if (isMine(conv)) return 'compose';
     return isAdmin() ? 'observe' : 'transferred';
   }
@@ -461,6 +471,13 @@ export class ChatPanel {
     } else if (mode === 'waiting') {
       this.footer.append(
         bar(h('span', null, '访客正在排队，接入后即可回复'), button('接入会话', { variant: 'primary', onClick: () => this.accept() })),
+      );
+    } else if (mode === 'bot') {
+      this.footer.append(
+        bar(
+          h('span', null, 'AI 智能客服正在接待，接管后由你继续回复'),
+          button('接管会话', { variant: 'primary', onClick: () => this.accept() }),
+        ),
       );
     } else if (mode === 'observe') {
       this.footer.append(bar(`该会话由客服 ${this.conv.agent_name || ''} 接待中，如需介入请先转接给自己`));
@@ -515,7 +532,7 @@ export class ChatPanel {
     if (msg.sender_type === 'system') {
       return h('div', { class: 'sys-msg' }, h('span', null, msg.content, ' · ', formatTime(msg.created_at)));
     }
-    const ours = msg.sender_type === 'agent';
+    const ours = msg.sender_type === 'agent' || msg.sender_type === 'bot';
     const grouped =
       prev &&
       prev.sender_type === msg.sender_type &&
@@ -530,10 +547,19 @@ export class ChatPanel {
           )
         : h('div', { class: 'bubble' }, renderText(msg.content));
     const name = ours ? msg.sender_name || '客服' : this.conv.visitor_name;
+    const bot = msg.sender_type === 'bot';
     return h(
       'div',
-      { class: `msg ${ours ? 'ours' : 'theirs'}${grouped ? ' grouped' : ''}` },
-      grouped ? null : h('div', { class: 'msg-meta' }, h('span', null, name), h('time', null, formatTime(msg.created_at))),
+      { class: `msg ${ours ? 'ours' : 'theirs'}${bot ? ' bot' : ''}${grouped ? ' grouped' : ''}` },
+      grouped
+        ? null
+        : h(
+            'div',
+            { class: 'msg-meta' },
+            h('span', null, name),
+            bot ? h('span', { class: 'ai-tag' }, 'AI') : null,
+            h('time', null, formatTime(msg.created_at)),
+          ),
       content,
     );
   }
@@ -637,7 +663,7 @@ export class VisitorPanel {
     const link = (href, text) =>
       href ? h('a', { href, target: '_blank', rel: 'noopener noreferrer', title: href }, text || href) : null;
 
-    clear(this.el, 
+    clear(this.el,
       h(
         'div',
         { class: 'info-head' },
@@ -673,6 +699,7 @@ export class VisitorPanel {
         row('开始时间', formatDateTime(c.created_at)),
         row('排队时长', c.assigned_at ? formatDuration(c.assigned_at - c.created_at) : null),
         row('首次响应', c.first_response_at ? formatDuration(c.first_response_at - c.created_at) : null),
+        c.handoff_at ? row('转人工', `${formatDateTime(c.handoff_at)}${c.handoff_reason ? `，${c.handoff_reason}` : ''}`) : null,
         row('接待客服', c.agent_name),
         c.status === 'closed' ? row('结束时间', formatDateTime(c.closed_at)) : null,
         c.rating ? row('满意度', h('span', null, stars(c.rating), c.rating_comment ? ` ${c.rating_comment}` : '')) : null,
@@ -756,7 +783,7 @@ class ConversationDetail {
       .then(({ conversation, visitor }) => {
         if (this.panel !== panel) return;
         this.info = new VisitorPanel(conversation, visitor);
-        clear(this.infoCol, 
+        clear(this.infoCol,
           h('div', { class: 'info-close' }, iconButton('x', { title: '关闭', onClick: () => this.infoCol.classList.remove('open') })),
           this.info.el,
         );
@@ -825,7 +852,11 @@ export class ChatsView {
   items() {
     const all = [...state.live.values()];
     if (this.tab === 'waiting') {
-      return all.filter((c) => c.status === 'waiting').sort((a, b) => a.created_at - b.created_at);
+      const since = (c) => c.handoff_at || c.created_at;
+      return all.filter((c) => c.status === 'waiting').sort((a, b) => since(a) - since(b));
+    }
+    if (this.tab === 'bot') {
+      return all.filter((c) => c.status === 'bot').sort((a, b) => b.last_message_at - a.last_message_at);
     }
     return all
       .filter((c) => c.status === 'active' && (!this.mineOnly || isMine(c)))
@@ -834,6 +865,9 @@ export class ChatsView {
 
   renderList() {
     const waitingCount = [...state.live.values()].filter((c) => c.status === 'waiting').length;
+    const botCount = [...state.live.values()].filter((c) => c.status === 'bot').length;
+    const showBot = botCount > 0 || state.settings.ai_enabled;
+    if (!showBot && this.tab === 'bot') this.tab = lastTab = 'active';
     const activeCount = [...state.live.values()].filter((c) => c.status === 'active' && (!this.mineOnly || isMine(c))).length;
     const tab = (key, label, count) =>
       h(
@@ -851,7 +885,12 @@ export class ChatsView {
         label,
         h('span', { class: `tab-count${key === 'waiting' && count ? ' alert' : ''}` }, String(count)),
       );
-    clear(this.tabs, tab('active', isAdmin() && !this.mineOnly ? '进行中（全部）' : '进行中', activeCount), tab('waiting', '排队中', waitingCount));
+    clear(
+      this.tabs,
+      tab('active', '进行中', activeCount),
+      tab('waiting', '排队中', waitingCount),
+      showBot ? tab('bot', 'AI 接待', botCount) : null,
+    );
 
     clear(this.filterBar);
     if (isAdmin() && this.tab === 'active') {
@@ -875,7 +914,8 @@ export class ChatsView {
     const items = this.items();
     clear(this.listEl);
     if (items.length === 0) {
-      this.listEl.append(emptyState(this.tab === 'waiting' ? '当前没有排队的访客' : '暂无进行中的会话'));
+      const empty = { waiting: '当前没有排队的访客', bot: 'AI 当前没有在接待的访客', active: '暂无进行中的会话' };
+      this.listEl.append(emptyState(empty[this.tab]));
       return;
     }
     for (const conv of items) {

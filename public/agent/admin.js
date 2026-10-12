@@ -156,7 +156,7 @@ export class DashboardView {
   }
 
   renderFilters() {
-    clear(this.filters, 
+    clear(this.filters,
       RANGES.map(([key, label]) =>
         h(
           'button',
@@ -193,7 +193,9 @@ export class DashboardView {
   renderLive() {
     const online = [...state.agents.values()].filter((a) => !a.disabled && a.status === 'online').length;
     const { current } = this.data;
-    clear(this.liveRow, 
+    clear(
+      this.liveRow,
+      state.settings.ai_enabled || current.bot ? statTile('AI 接待中', nf.format(current.bot), '实时') : null,
       statTile('排队中', nf.format(current.waiting), '实时'),
       statTile('进行中', nf.format(current.active), '实时'),
       statTile('在线客服', nf.format(online), `共 ${[...state.agents.values()].filter((a) => !a.disabled).length} 名`),
@@ -214,7 +216,17 @@ export class DashboardView {
       statTile('满意度', ratingText(o.avg_rating, o.rated), satisfaction),
       statTile('平均会话时长', formatDuration(o.avg_duration_ms), `已结束 ${nf.format(o.closed)} 个`),
       statTile('消息数', compact.format(o.messages), '访客与客服消息合计'),
-      statTile('未回复会话', nf.format(o.unanswered), '客服尚未回复过的会话'),
+      statTile('未回复会话', nf.format(o.unanswered), '客服和 AI 都没有回复过的会话'),
+      state.settings.ai_enabled || o.ai_conversations
+        ? statTile(
+            'AI 接待会话',
+            nf.format(o.ai_conversations),
+            o.ai_conversations
+              ? `AI 独立解决 ${Math.round((o.ai_resolved / o.ai_conversations) * 100)}%`
+              : '暂无',
+          )
+        : null,
+      state.settings.ai_enabled || o.handoffs ? statTile('转人工', nf.format(o.handoffs), 'AI 会话转给人工的次数') : null,
     );
 
     this.chart?.disconnect();
@@ -285,7 +297,7 @@ export class DashboardView {
       ),
     );
 
-    clear(this.content, 
+    clear(this.content,
       h('h3', { class: 'section-title' }, '实时状态'),
       this.liveRow,
       h('h3', { class: 'section-title' }, RANGES.find(([key]) => key === this.range)[1]),
@@ -366,7 +378,7 @@ export class AgentsView {
 
   render() {
     const agents = [...state.agents.values()];
-    clear(this.body, 
+    clear(this.body,
       h(
         'div',
         { class: 'card table-wrap' },
@@ -593,7 +605,32 @@ export class SettingsView {
       offline_message: h('textarea', { maxlength: 500, rows: 2, value: s.offline_message }),
       auto_assign: h('input', { type: 'checkbox', checked: s.auto_assign }),
       auto_close_minutes: h('input', { type: 'number', min: 0, max: 1440, value: String(s.auto_close_minutes) }),
+      ai_enabled: h('input', { type: 'checkbox', checked: s.ai_enabled }),
+      ai_mode: h(
+        'select',
+        null,
+        h('option', { value: 'always' }, 'AI 优先：所有新会话先由 AI 接待，需要时转人工'),
+        h('option', { value: 'offline' }, 'AI 兜底：只在没有客服能接待时由 AI 接待'),
+      ),
+      ai_name: h('input', { maxlength: 20, required: true, value: s.ai_name }),
+      ai_handoff_message: h('input', { maxlength: 200, value: s.ai_handoff_message }),
+      ai_instructions: h('textarea', {
+        maxlength: 4000,
+        rows: 5,
+        value: s.ai_instructions,
+        placeholder: '例如：我们是一家卖茶叶的网店，语气亲切；不要承诺具体的发货日期；遇到批发合作咨询请转人工。',
+      }),
     };
+    inputs.ai_mode.value = s.ai_mode;
+    const aiHint = h('span', { class: 'field-hint' });
+    get('/api/admin/ai/status')
+      .then(({ status }) => {
+        aiHint.textContent = status.configured
+          ? `已检测到 API Key，使用模型 ${status.model}。回答内容来自「知识库」中的条目。`
+          : '服务器未设置 ANTHROPIC_API_KEY 环境变量，开启后 AI 暂不会接待访客。';
+        aiHint.classList.toggle('warn', !status.configured);
+      })
+      .catch(() => {});
     const form = h(
       'form',
       { class: 'card form settings-form' },
@@ -606,6 +643,13 @@ export class SettingsView {
       field('排队提示', inputs.queue_message, '有客服在线但暂时无法接入时发送给访客'),
       field('离线提示', inputs.offline_message, '没有客服在线时发送给访客'),
       field('无消息自动结束（分钟）', inputs.auto_close_minutes, '进行中的会话超过该时间没有新消息将自动结束，0 表示不自动结束'),
+      h('h3', null, 'AI 智能客服'),
+      h('label', { class: 'check' }, inputs.ai_enabled, '开启 AI 智能客服：根据知识库自动回答访客问题'),
+      aiHint,
+      field('接待模式', inputs.ai_mode),
+      field('AI 客服名称', inputs.ai_name, '访客看到的 AI 客服名字'),
+      field('转人工提示', inputs.ai_handoff_message, 'AI 把会话转给人工时发送给访客，留空则不发送'),
+      field('补充说明', inputs.ai_instructions, '告诉 AI 你的业务背景、语气要求和不能做的事，会附加在 AI 的指令中'),
       h('div', { class: 'form-actions' }, button('保存设置', { variant: 'primary', type: 'submit' })),
     );
     form.addEventListener('submit', async (event) => {
@@ -620,6 +664,11 @@ export class SettingsView {
           offline_message: inputs.offline_message.value.trim(),
           auto_assign: inputs.auto_assign.checked,
           auto_close_minutes: Number(inputs.auto_close_minutes.value) || 0,
+          ai_enabled: inputs.ai_enabled.checked,
+          ai_mode: inputs.ai_mode.value,
+          ai_name: inputs.ai_name.value.trim(),
+          ai_handoff_message: inputs.ai_handoff_message.value.trim(),
+          ai_instructions: inputs.ai_instructions.value.trim(),
         });
         state.settings = settings;
         toast('设置已保存', 'success');

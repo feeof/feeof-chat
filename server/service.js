@@ -530,7 +530,14 @@ class ChatService {
   async runAiReply(conversationId) {
     const initial = this.store.getConversation(conversationId);
     if (!initial || initial.status !== 'bot') return;
-    const typing = () => this.emit([`visitor:${initial.visitor_id}`], 'typing', { conversation_id: initial.id, from: 'agent' });
+    if (this.store.countBotMessages(conversationId) >= this.config.ai.maxRepliesPerConversation) {
+      this.handoff(initial, 'AI 回复次数已达上限');
+      return;
+    }
+    const typing = () => {
+      if (this.store.getConversation(conversationId)?.status !== 'bot') return;
+      this.emit([`visitor:${initial.visitor_id}`], 'typing', { conversation_id: initial.id, from: 'agent' });
+    };
     typing();
     const timer = setInterval(typing, 3000);
     let result;
