@@ -8,6 +8,8 @@ const { openDatabase } = require('./db');
 const { Store } = require('./store');
 const { Presence } = require('./presence');
 const { ChatService } = require('./service');
+const { KnowledgeBase } = require('./ai/knowledge');
+const { AiAssistant } = require('./ai/assistant');
 const { setupRealtime } = require('./realtime');
 const { hashPassword, generatePassword } = require('./auth');
 const { HttpError } = require('./util');
@@ -66,19 +68,25 @@ async function ensureAdmin(store, config) {
   }
 }
 
-function createApp(overrides = {}) {
+/**
+ * `overrides` may set any config value; `aiClient` replaces the Anthropic
+ * client (tests pass a scripted fake).
+ */
+function createApp({ aiClient, ...overrides } = {}) {
   const config = loadConfig(overrides);
   const db = openDatabase(config.dbFile);
   const store = new Store(db);
   const presence = new Presence();
-  const service = new ChatService({ store, presence, config });
+  const knowledge = new KnowledgeBase(store);
+  const ai = new AiAssistant({ store, knowledge, config, client: aiClient });
+  const service = new ChatService({ store, presence, config, ai });
 
   const app = express();
   app.disable('x-powered-by');
   app.set('trust proxy', config.trustProxy);
   app.use(securityHeaders(config));
 
-  const deps = { store, service, config };
+  const deps = { store, service, config, ai, knowledge };
   app.use('/api', express.json({ limit: '100kb' }), (req, res, next) => {
     if (req.body === undefined) req.body = {};
     next();
@@ -134,11 +142,15 @@ function createApp(overrides = {}) {
 
   async function stop() {
     clearInterval(maintenanceTimer);
+    // Let in-flight AI replies finish writing before the database closes.
+    let timer;
+    await Promise.race([service.aiIdle(), new Promise((resolve) => (timer = setTimeout(resolve, 5000)))]);
+    clearTimeout(timer);
     await new Promise((resolve) => io.close(() => resolve()));
     db.close();
   }
 
-  return { app, server, io, store, service, presence, config, start, stop };
+  return { app, server, io, store, service, presence, config, ai, knowledge, start, stop };
 }
 
 module.exports = { createApp };

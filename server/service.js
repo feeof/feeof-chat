@@ -6,6 +6,16 @@ const { badRequest, forbidden, notFound, conflict, readString } = require('./uti
 
 const IMAGE_URL_RE = /^\/uploads\/([a-f0-9]{32}\.(?:png|jpg|gif|webp))$/;
 
+// Short messages that mean "let me talk to a person"; handled without calling the AI.
+const HANDOFF_PHRASES = new Set([
+  '人工', '转人工', '人工客服', '转人工客服', '找人工', '人工服务', '真人', '真人客服', '客服',
+  'human', 'agent', 'humanagent', 'realperson', 'person',
+]);
+
+function isHandoffRequest(text) {
+  return HANDOFF_PHRASES.has(text.toLowerCase().replace(/[\s\p{P}\p{S}]/gu, ''));
+}
+
 const CLOSE_TEXT = {
   agent: '客服已结束本次会话，感谢您的咨询！',
   visitor: '访客已结束会话',
@@ -16,20 +26,26 @@ const CLOSE_TEXT = {
  * Conversation workflow: routing, assignment, messaging and the realtime
  * notifications that go with each state change.
  *
+ * Conversation statuses: bot (the AI is answering) -> waiting (queued for a
+ * human) -> active (an agent is serving) -> closed.
+ *
  * Socket.IO rooms used:
- *   agents        every connected agent (sees the waiting queue)
+ *   agents        every connected agent (sees the queue and AI conversations)
  *   admins        connected admins (see every conversation)
  *   agent:<id>    one agent's connections
  *   visitors      every connected visitor
  *   visitor:<id>  one visitor's connections
  */
 class ChatService {
-  constructor({ store, presence, config }) {
+  constructor({ store, presence, config, ai = null }) {
     this.store = store;
     this.presence = presence;
     this.config = config;
+    this.ai = ai;
     this.io = null;
     this.draining = false;
+    // conversation id -> in-flight AI reply ({ promise, again })
+    this.aiJobs = new Map();
   }
 
   attach(io) {
@@ -61,6 +77,8 @@ class ChatService {
       last_message_at: conv.last_message_at,
       last_message_preview: conv.last_message_preview,
       agent_unread: conv.agent_unread,
+      handoff_at: conv.handoff_at,
+      handoff_reason: conv.handoff_reason,
     };
   }
 
@@ -82,7 +100,7 @@ class ChatService {
       conversation_id: msg.conversation_id,
       sender_type: msg.sender_type,
       sender_id: msg.sender_id,
-      sender_name: msg.sender_name || null,
+      sender_name: msg.sender_type === 'bot' ? this.store.getSettings().ai_name : msg.sender_name || null,
       type: msg.type,
       content: msg.content,
       created_at: msg.created_at,
@@ -136,7 +154,7 @@ class ChatService {
   // ---- realtime publishing ----
 
   agentRooms(conv) {
-    if (conv.status === 'waiting') return ['agents'];
+    if (conv.status === 'waiting' || conv.status === 'bot') return ['agents'];
     return conv.agent_id ? [`agent:${conv.agent_id}`, 'admins'] : ['admins'];
   }
 
@@ -175,7 +193,7 @@ class ChatService {
   }
 
   canView(user, conv) {
-    return user.role === 'admin' || conv.status === 'waiting' || conv.agent_id === user.id;
+    return user.role === 'admin' || conv.status === 'waiting' || conv.status === 'bot' || conv.agent_id === user.id;
   }
 
   requireViewable(user, id) {
@@ -298,7 +316,7 @@ class ChatService {
     const { conversation, message, created } = this.store.tx(() => {
       let conv = this.store.getOpenConversation(visitor.id);
       const isNew = !conv;
-      if (isNew) conv = this.store.createConversation(visitor.id, now);
+      if (isNew) conv = this.store.createConversation(visitor.id, now, this.shouldUseAi() ? 'bot' : 'waiting');
       const msg = this.store.addMessage({
         conversationId: conv.id,
         senderType: 'visitor',
@@ -313,11 +331,20 @@ class ChatService {
     });
     this.publishConversation(conversation);
     this.publishMessage(conversation, message);
-    if (created && !this.tryAutoAssign(conversation)) {
+    if (conversation.status === 'bot') {
+      if (type === 'text' && isHandoffRequest(content)) this.handoff(conversation, '访客要求人工服务');
+      else this.scheduleAiReply(conversation.id);
+    } else if (created && !this.tryAutoAssign(conversation)) {
       const settings = this.store.getSettings();
       this.addSystemMessage(conversation, this.isServiceOnline() ? settings.queue_message : settings.offline_message);
     }
     return message;
+  }
+
+  handoffByVisitor(visitor) {
+    const conv = this.store.getOpenConversation(visitor.id);
+    if (!conv || conv.status !== 'bot') throw conflict('当前已经是人工服务');
+    return this.handoff(conv, '访客点击了转人工');
   }
 
   closeByVisitor(visitor) {
@@ -351,9 +378,10 @@ class ChatService {
   // ---- agent actions ----
 
   acceptConversation(user, conversationId) {
-    const conv = this.requireConversation(conversationId);
+    let conv = this.requireConversation(conversationId);
     if (conv.status === 'active') throw conflict('该会话已被其他客服接入');
     if (conv.status === 'closed') throw conflict('该会话已结束');
+    if (conv.status === 'bot') conv = this.markHandoff(conv, `客服 ${user.display_name} 主动接管`);
     return this.assign(conv, user);
   }
 
@@ -364,7 +392,9 @@ class ChatService {
     const target = this.store.getUser(targetId);
     if (!target || target.disabled) throw badRequest('目标客服不存在或已被禁用');
     if (target.id === conv.agent_id) throw badRequest('该会话已由此客服接待');
-    return this.assign(conv, target, { transfer: conv.status === 'active' });
+    const transfer = conv.status === 'active';
+    const current = conv.status === 'bot' ? this.markHandoff(conv, `由 ${user.display_name} 分配给人工客服`) : conv;
+    return this.assign(current, target, { transfer });
   }
 
   closeByAgent(user, conversationId) {
@@ -450,15 +480,129 @@ class ChatService {
     }
   }
 
+  // ---- AI customer service ----
+
+  aiReady(settings = this.store.getSettings()) {
+    return Boolean(settings.ai_enabled && this.ai && this.ai.isConfigured());
+  }
+
+  /** Whether a brand-new conversation should start with the AI. */
+  shouldUseAi() {
+    const settings = this.store.getSettings();
+    if (!this.aiReady(settings)) return false;
+    if (settings.ai_mode === 'always') return true;
+    // 'offline' mode: only when no human could pick the conversation up now.
+    return settings.auto_assign ? !this.pickAgent() : !this.isServiceOnline();
+  }
+
+  /**
+   * Runs the AI for a conversation. Replies never overlap: a visitor message
+   * that arrives mid-reply triggers one more pass once the current one ends.
+   */
+  scheduleAiReply(conversationId) {
+    const running = this.aiJobs.get(conversationId);
+    if (running) {
+      running.again = true;
+      return running.promise;
+    }
+    const job = { again: false };
+    job.promise = (async () => {
+      try {
+        do {
+          job.again = false;
+          await this.runAiReply(conversationId);
+        } while (job.again);
+      } catch (err) {
+        console.error('[ai]', err);
+      } finally {
+        this.aiJobs.delete(conversationId);
+      }
+    })();
+    this.aiJobs.set(conversationId, job);
+    return job.promise;
+  }
+
+  /** Resolves once no AI reply is in flight (used by tests and shutdown). */
+  async aiIdle() {
+    while (this.aiJobs.size) await Promise.all([...this.aiJobs.values()].map((job) => job.promise));
+  }
+
+  async runAiReply(conversationId) {
+    const initial = this.store.getConversation(conversationId);
+    if (!initial || initial.status !== 'bot') return;
+    const typing = () => this.emit([`visitor:${initial.visitor_id}`], 'typing', { conversation_id: initial.id, from: 'agent' });
+    typing();
+    const timer = setInterval(typing, 3000);
+    let result;
+    let history;
+    try {
+      history = this.store.listMessages(conversationId, { limit: 100 });
+      result = await this.ai.respond(history, this.store.getSettings());
+    } finally {
+      clearInterval(timer);
+    }
+    // An agent may have taken over, or the visitor left, while the AI was thinking.
+    const conv = this.store.getConversation(conversationId);
+    if (!conv || conv.status !== 'bot') return;
+    // If the visitor wrote again meanwhile, this answer missed it: drop it and
+    // let the queued follow-up pass answer everything at once. (A handoff stands.)
+    const seen = history.length ? history[history.length - 1].id : 0;
+    const newer = this.store.listMessages(conversationId, { limit: 100 }).some(
+      (m) => m.id > seen && m.sender_type === 'visitor',
+    );
+    if (result.action === 'answer' && newer) return;
+    if (result.text) this.addBotMessage(conv, result.text);
+    if (result.action === 'handoff') this.handoff(this.store.getConversation(conversationId), result.reason);
+  }
+
+  addBotMessage(conv, text) {
+    const msg = this.store.addMessage({ conversationId: conv.id, senderType: 'bot', content: text });
+    const updated = this.store.getConversation(conv.id);
+    this.publishConversation(updated);
+    this.publishMessage(updated, msg);
+    return msg;
+  }
+
+  markHandoff(conv, reason) {
+    this.store.updateConversation(conv.id, { handoff_at: Date.now(), handoff_reason: reason });
+    return this.store.getConversation(conv.id);
+  }
+
+  /** Moves an AI conversation to the human queue and routes it like any new conversation. */
+  handoff(conv, reason) {
+    if (!conv || conv.status !== 'bot') return conv;
+    this.store.updateConversation(conv.id, {
+      status: 'waiting',
+      handoff_at: Date.now(),
+      handoff_reason: reason ? String(reason).slice(0, 200) : null,
+    });
+    const queued = this.store.getConversation(conv.id);
+    this.publishConversation(queued, ['agents']);
+    const settings = this.store.getSettings();
+    this.addSystemMessage(queued, settings.ai_handoff_message);
+    if (!this.tryAutoAssign(queued) && !this.isServiceOnline()) {
+      this.addSystemMessage(queued, settings.offline_message);
+    }
+    return this.store.getConversation(conv.id);
+  }
+
+  /** Reacts to settings changes that affect conversations already in progress. */
+  settingsChanged(previous, next) {
+    if (previous.ai_enabled && !next.ai_enabled) {
+      for (const conv of this.store.listBotConversations()) this.handoff(conv, 'AI 客服已关闭');
+    }
+    if (next.auto_assign) this.drainQueue();
+  }
+
   // ---- maintenance ----
 
   closeIdleConversations(now = Date.now()) {
     const minutes = Number(this.store.getSettings().auto_close_minutes);
     if (!(minutes > 0)) return 0;
-    const idle = this.store.listIdleActiveConversations(now - minutes * 60 * 1000);
+    const idle = this.store.listIdleConversations(now - minutes * 60 * 1000);
     for (const conv of idle) this.close(conv, 'system');
     return idle.length;
   }
 }
 
-module.exports = { ChatService };
+module.exports = { ChatService, isHandoffRequest };
