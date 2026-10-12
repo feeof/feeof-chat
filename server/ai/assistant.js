@@ -8,6 +8,8 @@ const { formatArticles } = require('./knowledge');
 const MAX_TOOL_ROUNDS = 4;
 const HISTORY_LIMIT = 40;
 const MAX_IMAGES = 3;
+// Base64 adds a third; this keeps encoded images under the API's 5 MB image limit.
+const MAX_IMAGE_BYTES = 3.75 * 1024 * 1024;
 const MAX_REPLY_CHARS = 4000;
 const IMAGE_TYPES = { png: 'image/png', jpg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp' };
 // Models that accept the `fallbacks: "default"` server-side refusal fallback.
@@ -124,7 +126,8 @@ class AiAssistant {
   }
 
   getClient() {
-    if (!this.client) this.client = new Anthropic({ timeout: 60 * 1000, maxRetries: 2 });
+    // A visitor is waiting: fail over to a human rather than retrying for minutes.
+    if (!this.client) this.client = new Anthropic({ timeout: 90 * 1000, maxRetries: 1 });
     return this.client;
   }
 
@@ -210,7 +213,7 @@ class AiAssistant {
     const name = path.basename(url);
     const mediaType = IMAGE_TYPES[path.extname(name).slice(1)];
     const file = path.join(this.config.uploadsDir, name);
-    if (!mediaType || !fs.existsSync(file)) return null;
+    if (!mediaType || !fs.existsSync(file) || fs.statSync(file).size > MAX_IMAGE_BYTES) return null;
     return { type: 'image', source: { type: 'base64', media_type: mediaType, data: fs.readFileSync(file).toString('base64') } };
   }
 

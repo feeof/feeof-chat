@@ -115,19 +115,25 @@ function applyConfig(config) {
 
 function renderStatus() {
   const conv = state.conversation;
-  const online = state.config && state.config.online;
+  const humans = Boolean(state.config && state.config.online);
+  const ai = Boolean(state.config && state.config.ai_enabled);
   let text;
-  if (conv && conv.status === 'active') text = `客服 ${conv.agent_name || ''} 正在为您服务`;
-  else if (conv && conv.status === 'waiting') text = online ? '正在为您接入客服…' : '客服暂时离线，您可以先留言';
-  else text = online ? '客服在线' : '客服离线，可以留言';
+  if (conv && conv.status === 'bot') text = `${state.config.ai_name} 为您服务`;
+  else if (conv && conv.status === 'active') text = `客服 ${conv.agent_name || ''} 正在为您服务`;
+  else if (conv && conv.status === 'waiting') text = humans ? '正在为您接入客服…' : '客服暂时离线，您可以先留言';
+  else text = humans || ai ? '客服在线' : '客服离线，可以留言';
   els.statusText.textContent = text;
-  els.statusDot.classList.toggle('online', Boolean(online || (conv && conv.status === 'active')));
+  const live = conv && conv.status !== 'closed' && conv.status !== 'waiting';
+  els.statusDot.classList.toggle('online', Boolean(live || (conv && conv.status === 'waiting' ? humans : humans || ai)));
   renderActions();
 }
 
 function renderActions() {
   clear(els.actions);
   const open = state.conversation && state.conversation.status !== 'closed';
+  if (state.conversation && state.conversation.status === 'bot') {
+    els.actions.append(h('button', { type: 'button', class: 'text-btn', title: '转接人工客服', onclick: requestHuman }, '转人工'));
+  }
   els.actions.append(
     h('button', { type: 'button', title: '留下联系方式', 'aria-label': '留下联系方式', onclick: toggleProfile }, icon('user')),
   );
@@ -174,7 +180,14 @@ function renderMessage(msg) {
     h(
       'div',
       { class: 'msg-body' },
-      mine ? null : h('div', { class: 'msg-name' }, msg.sender_name || '客服'),
+      mine
+        ? null
+        : h(
+            'div',
+            { class: 'msg-name' },
+            msg.sender_name || '客服',
+            msg.sender_type === 'bot' ? h('span', { class: 'ai-tag' }, 'AI') : null,
+          ),
       messageContent(msg),
     ),
   );
@@ -196,7 +209,14 @@ function scrollToBottom(force = true) {
 function welcomeNode() {
   const text = state.config && state.config.welcome_message;
   if (!text) return null;
-  return renderMessage({ id: 'welcome', sender_type: 'agent', sender_name: state.config.site_name, type: 'text', content: text });
+  const ai = state.config.ai_enabled;
+  return renderMessage({
+    id: 'welcome',
+    sender_type: ai ? 'bot' : 'agent',
+    sender_name: ai ? state.config.ai_name : state.config.site_name,
+    type: 'text',
+    content: text,
+  });
 }
 
 function renderAll(messages) {
@@ -417,7 +437,7 @@ function showRating(conv) {
     }
   }
 
-  clear(els.rating, 
+  clear(els.rating,
     h('div', { class: 'rating-title' }, '本次服务您还满意吗？'),
     h('div', { class: 'stars' }, stars),
     label,
@@ -431,6 +451,15 @@ function showRating(conv) {
   );
   els.rating.hidden = false;
   scrollToBottom();
+}
+
+async function requestHuman() {
+  try {
+    const { conversation } = await api('POST', '/api/visitor/handoff');
+    setConversation(conversation);
+  } catch (err) {
+    toast(err.message);
+  }
 }
 
 async function endConversation() {
@@ -492,7 +521,7 @@ function connectSocket() {
     }
   });
   socket.on('message', (msg) => {
-    if (appendMessage(msg) && msg.sender_type === 'agent') hideTyping();
+    if (appendMessage(msg) && msg.sender_type !== 'visitor') hideTyping();
   });
   socket.on('conversation', setConversation);
   socket.on('service:status', ({ online }) => {

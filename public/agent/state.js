@@ -33,7 +33,7 @@ export function isMine(conv) {
 
 function belongsInWorkspace(conv) {
   if (conv.status === 'closed') return false;
-  return conv.status === 'waiting' || isMine(conv) || isAdmin();
+  return conv.status === 'waiting' || conv.status === 'bot' || isMine(conv) || isAdmin();
 }
 
 /** Stores a conversation snapshot and notifies listeners with the previous one. */

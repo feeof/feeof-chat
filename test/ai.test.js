@@ -87,7 +87,7 @@ test('the AI answers from the knowledge base with a cache-friendly request', asy
   const { srv, admin, claude } = await setup(t, { reply: () => reply('签收后 7 天内可以无理由退货。') });
   const visitor = await srv.newVisitor();
   assert.equal(visitor.config.ai_enabled, true);
-  assert.equal(visitor.config.online, true, 'the AI counts as someone online');
+  assert.equal(visitor.config.online, false, '`online` reports human agents only');
   const vs = srv.socket({ visitorToken: visitor.token });
   await vs.ready;
 
@@ -349,6 +349,20 @@ test('without credentials the AI stays out even when enabled', async (t) => {
   assert.equal(testCall.status, 400);
 });
 
+test('a conversation stops using the AI after the reply cap', async (t) => {
+  const { srv, admin, claude } = await setup(t, { ai: { maxRepliesPerConversation: 2 } });
+  const visitor = await srv.newVisitor();
+  let msg;
+  for (const text of ['一', '二', '三']) {
+    msg = await visitorSays(srv, visitor, text);
+    await srv.chat.service.aiIdle();
+  }
+  assert.equal(claude.calls.length, 2);
+  const conv = await conversation(srv, admin, msg.conversation_id);
+  assert.equal(conv.status, 'waiting');
+  assert.equal(conv.handoff_reason, 'AI 回复次数已达上限');
+});
+
 // ---- knowledge base administration ----
 
 test('knowledge base management API', async (t) => {
@@ -371,6 +385,15 @@ test('knowledge base management API', async (t) => {
   });
   assert.equal(badImport.status, 400);
   assert.match(badImport.data.error, /第 2 条/);
+
+  // Imports may be far larger than ordinary API requests (Chinese text is 3 bytes per character).
+  const big = await srv.request('POST', '/api/admin/kb/import', {
+    token: admin.token,
+    body: { articles: Array.from({ length: 20 }, (_, i) => ({ title: `长文档 ${i}`, content: '测'.repeat(19000) })) },
+  });
+  assert.equal(big.status, 201);
+  assert.equal(big.data.created, 20);
+  assert.equal((await srv.request('POST', '/api/visitor/session', { body: { name: '测'.repeat(60000) } })).status, 413);
 
   const search = await srv.request('GET', `/api/admin/kb/search?q=${encodeURIComponent('几点上班')}`, { token: admin.token });
   assert.equal(search.data.results.length, 0);
