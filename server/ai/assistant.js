@@ -2,26 +2,27 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const { Anthropic } = require('@anthropic-ai/sdk');
 const { formatArticles } = require('./knowledge');
+const anthropic = require('./providers/anthropic');
+const openai = require('./providers/openai');
 
 const MAX_TOOL_ROUNDS = 4;
 const HISTORY_LIMIT = 40;
 const MAX_IMAGES = 3;
-// Base64 adds a third; this keeps encoded images under the API's 5 MB image limit.
+// Base64 adds a third; this keeps encoded images under common 5 MB image limits.
 const MAX_IMAGE_BYTES = 3.75 * 1024 * 1024;
 const MAX_REPLY_CHARS = 4000;
 const IMAGE_TYPES = { png: 'image/png', jpg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp' };
-// Models that accept the `fallbacks: "default"` server-side refusal fallback.
-const FALLBACK_MODELS = /^claude-(opus-5|opus-5-5|fable-5-1|sonnet-5-5)$/;
+const PROVIDERS = ['anthropic', 'openai'];
+const DEFAULT_BASE_URLS = { anthropic: anthropic.DEFAULT_BASE_URL, openai: openai.DEFAULT_BASE_URL };
 
+// Tool definitions in a provider-neutral shape; each provider maps them to its API.
 const TRANSFER_TOOL = {
   name: 'transfer_to_human',
   description:
     '把对话转接给人工客服。当知识库资料不足以回答、访客要求人工、或问题需要人工处理' +
     '（退款、投诉、查询或修改具体订单、账号与支付安全等）时调用。调用后对话由人工接手，你不再回复。',
-  strict: true,
-  input_schema: {
+  parameters: {
     type: 'object',
     properties: {
       reason: { type: 'string', description: '转人工的原因，一句话，给人工客服看' },
@@ -35,8 +36,7 @@ const SEARCH_TOOL = {
   name: 'search_knowledge_base',
   description:
     '在知识库中检索与问题相关的条目。当已提供的 <retrieved_knowledge> 中没有答案时，换用更具体的关键词再检索一次。',
-  strict: true,
-  input_schema: {
+  parameters: {
     type: 'object',
     properties: {
       query: { type: 'string', description: '检索关键词或问题' },
@@ -86,33 +86,27 @@ function retrievalQuery(history) {
     .join('\n');
 }
 
-/**
- * Drops content that must not be echoed back after a server-side refusal
- * fallback: before the last `fallback` marker only text blocks are kept.
- */
-function echoableContent(content) {
-  const boundary = content.map((b) => b.type).lastIndexOf('fallback');
-  return content.filter((block, i) => block.type !== 'fallback' && (i > boundary || block.type === 'text'));
+function describeError(err) {
+  return anthropic.describeError(err) || openai.describeError(err) || (err && err.message ? err.message : String(err));
 }
 
-function describeError(err) {
-  if (err instanceof Anthropic.AuthenticationError || err instanceof Anthropic.PermissionDeniedError) {
-    return 'API Key 无效或没有权限，请检查 ANTHROPIC_API_KEY';
-  }
-  if (err instanceof Anthropic.RateLimitError) return '请求过于频繁（429），已达到速率限制';
-  if (err instanceof Anthropic.APIConnectionError) return '无法连接到 Claude API，请检查服务器网络';
-  if (err instanceof Anthropic.BadRequestError) return `请求参数错误：${err.message}`;
-  if (err instanceof Anthropic.APIError) return `Claude API 错误（${err.status ?? '未知'}）：${err.message}`;
-  return err && err.message ? err.message : String(err);
+function maskKey(key) {
+  if (!key) return null;
+  return key.length > 12 ? `${key.slice(0, 5)}…${key.slice(-4)}` : '已设置';
 }
 
 class AiAssistant {
-  constructor({ store, knowledge, config, client }) {
+  /**
+   * `client` replaces the Anthropic SDK client and `fetchImpl` the fetch used
+   * for OpenAI-compatible APIs (both for tests).
+   */
+  constructor({ store, knowledge, config, client, fetchImpl }) {
     this.store = store;
     this.knowledge = knowledge;
     this.config = config;
-    this.client = client || null;
-    this.injectedClient = Boolean(client);
+    this.injectedClient = client || null;
+    this.fetchImpl = fetchImpl;
+    this.cached = null;
     this.lastError = null;
   }
 
@@ -120,23 +114,72 @@ class AiAssistant {
     return this.config.ai;
   }
 
-  /** Whether credentials are present (an `ant auth login` profile is not detected). */
-  isConfigured() {
-    return this.injectedClient || Boolean(process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN);
+  /** The connection in effect: values saved in the admin UI over environment defaults. */
+  connection() {
+    const env = this.settings;
+    const saved = this.store.getAiConnection();
+    const provider = PROVIDERS.includes(saved.provider) ? saved.provider : env.provider;
+    const pick = (field, fallback) => (saved[field] !== undefined ? saved[field] : fallback);
+    const envKey = env.apiKey || (provider === 'openai' ? process.env.OPENAI_API_KEY : '') || '';
+    // Without a key of our own the Anthropic SDK reads these itself.
+    const sdkEnvKey = provider === 'anthropic' ? process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN : '';
+    let keySource = null;
+    if (saved.api_key) keySource = 'settings';
+    else if (envKey || sdkEnvKey) keySource = 'env';
+    return {
+      provider,
+      base_url: pick('base_url', env.baseUrl) || '',
+      api_key: saved.api_key || envKey,
+      api_key_source: keySource,
+      api_key_hint: maskKey(saved.api_key || envKey || sdkEnvKey),
+      model: pick('model', env.model) || (provider === 'anthropic' ? anthropic.DEFAULT_MODEL : ''),
+      effort: provider === 'anthropic' ? pick('effort', env.effort) : '',
+      vision: Boolean(pick('vision', env.vision)),
+    };
   }
 
-  getClient() {
-    // A visitor is waiting: fail over to a human rather than retrying for minutes.
-    if (!this.client) this.client = new Anthropic({ timeout: 90 * 1000, maxRetries: 1 });
-    return this.client;
+  /** What the admin UI may see: everything except the key itself. */
+  connectionView() {
+    const view = { ...this.connection() };
+    delete view.api_key;
+    return { ...view, api_key_set: Boolean(view.api_key_source), default_base_url: DEFAULT_BASE_URLS[view.provider] };
+  }
+
+  isConfigured() {
+    const conn = this.connection();
+    if (conn.provider === 'openai') return Boolean(conn.model && (conn.api_key || conn.base_url));
+    return Boolean(this.injectedClient || conn.api_key_source);
+  }
+
+  /** Builds (and caches) the provider client for the current connection. */
+  provider() {
+    const conn = this.connection();
+    const signature = JSON.stringify([conn, this.settings.maxTokens, this.settings.fallbacks]);
+    if (!this.cached || this.cached.signature !== signature) {
+      const common = { apiKey: conn.api_key, baseUrl: conn.base_url, model: conn.model, maxTokens: this.settings.maxTokens };
+      const instance =
+        conn.provider === 'openai'
+          ? new openai.OpenAiProvider({ ...common, vision: conn.vision, fetchImpl: this.fetchImpl })
+          : new anthropic.AnthropicProvider({
+              ...common,
+              client: this.injectedClient,
+              effort: conn.effort,
+              fallbacks: this.settings.fallbacks,
+            });
+      this.cached = { signature, instance };
+    }
+    return this.cached.instance;
   }
 
   status() {
     const kb = this.knowledge.stats();
+    const conn = this.connection();
     return {
       configured: this.isConfigured(),
-      model: this.settings.model,
-      effort: this.settings.effort,
+      provider: conn.provider,
+      base_url: conn.base_url || DEFAULT_BASE_URLS[conn.provider],
+      model: conn.model,
+      effort: conn.effort || null,
       knowledge_mode: this.useFullKnowledge() ? 'full' : 'retrieval',
       knowledge_articles: kb.articles,
       knowledge_chars: kb.chars,
@@ -150,105 +193,82 @@ class AiAssistant {
   }
 
   /**
-   * Builds the request pieces. The stable part (tools + system instructions,
-   * plus the whole knowledge base when it is small) carries the cache
-   * breakpoint; per-question retrieval results come after it so they never
-   * invalidate the cached prefix.
+   * Builds the request pieces. The stable prompt (instructions, plus the
+   * whole knowledge base when it is small) comes first so it can be cached;
+   * per-question retrieval results go in the dynamic part after it.
    */
-  buildRequest(history, siteSettings) {
+  buildRequest(history, siteSettings, supportsImages) {
     const full = this.useFullKnowledge();
-    const system = [
-      {
-        type: 'text',
-        text: stablePrompt(siteSettings, full ? formatArticles(this.knowledge.all()) : null),
-        cache_control: { type: 'ephemeral' },
-      },
-    ];
     let retrieved = [];
+    let dynamicPrompt = null;
     if (!full) {
       retrieved = this.knowledge.search(retrievalQuery(history), 5).map((r) => r.article);
-      system.push({
-        type: 'text',
-        text: `<retrieved_knowledge>\n${retrieved.length ? formatArticles(retrieved) : '（没有找到相关条目）'}\n</retrieved_knowledge>`,
-      });
+      dynamicPrompt = `<retrieved_knowledge>\n${retrieved.length ? formatArticles(retrieved) : '（没有找到相关条目）'}\n</retrieved_knowledge>`;
     }
     return {
-      system,
+      stablePrompt: stablePrompt(siteSettings, full ? formatArticles(this.knowledge.all()) : null),
+      dynamicPrompt,
       tools: full ? [TRANSFER_TOOL] : [SEARCH_TOOL, TRANSFER_TOOL],
-      messages: this.toApiMessages(history),
+      messages: this.toMessages(history, supportsImages),
       retrieved,
     };
   }
 
-  /** Maps stored conversation messages to Claude messages (visitor -> user, staff/AI -> assistant). */
-  toApiMessages(history) {
+  /** Maps stored conversation messages to neutral turns (visitor -> user, staff/AI -> assistant). */
+  toMessages(history, supportsImages) {
     const recent = history.filter((m) => m.sender_type !== 'system').slice(-HISTORY_LIMIT);
     const imageIds = new Set(
-      recent
-        .filter((m) => m.sender_type === 'visitor' && m.type === 'image')
-        .slice(-MAX_IMAGES)
-        .map((m) => m.id),
+      supportsImages
+        ? recent
+            .filter((m) => m.sender_type === 'visitor' && m.type === 'image')
+            .slice(-MAX_IMAGES)
+            .map((m) => m.id)
+        : [],
     );
     const messages = [];
     for (const m of recent) {
       const role = m.sender_type === 'visitor' ? 'user' : 'assistant';
-      let block;
+      let part;
       if (m.type === 'image') {
-        block = (imageIds.has(m.id) && this.imageBlock(m.content)) || {
+        part = (imageIds.has(m.id) && this.imagePart(m.content)) || {
           type: 'text',
           text: role === 'user' ? '[访客发送了一张图片]' : '[客服发送了一张图片]',
         };
       } else {
-        block = { type: 'text', text: m.content };
+        part = { type: 'text', text: m.content };
       }
       const last = messages.at(-1);
-      if (last && last.role === role) last.content.push(block);
-      else messages.push({ role, content: [block] });
+      if (last && last.role === role) last.parts.push(part);
+      else messages.push({ role, parts: [part] });
     }
     while (messages.length && messages[0].role !== 'user') messages.shift();
     return messages;
   }
 
-  imageBlock(url) {
+  imagePart(url) {
     const name = path.basename(url);
     const mediaType = IMAGE_TYPES[path.extname(name).slice(1)];
     const file = path.join(this.config.uploadsDir, name);
     if (!mediaType || !fs.existsSync(file) || fs.statSync(file).size > MAX_IMAGE_BYTES) return null;
-    return { type: 'image', source: { type: 'base64', media_type: mediaType, data: fs.readFileSync(file).toString('base64') } };
+    return { type: 'image', mediaType, data: fs.readFileSync(file).toString('base64') };
   }
 
-  requestParams({ system, tools, messages }) {
-    const params = {
-      model: this.settings.model,
-      max_tokens: this.settings.maxTokens,
-      system,
-      tools,
-      messages,
-      output_config: { effort: this.settings.effort },
-    };
-    // Server-side refusal fallback: a classifier decline is retried on the
-    // model Anthropic recommends for that category instead of failing.
-    if (this.settings.fallbacks && FALLBACK_MODELS.test(this.settings.model)) {
-      params.betas = ['server-side-fallback-2026-07-01'];
-      params.fallbacks = 'default';
-    }
-    return params;
-  }
-
-  runTool(block) {
-    if (block.name === 'search_knowledge_base') {
-      const query = block.input && block.input.query;
+  runTool(call) {
+    if (call.name === 'search_knowledge_base') {
+      const query = call.input && call.input.query;
       if (typeof query !== 'string' || !query.trim()) {
-        return { type: 'tool_result', tool_use_id: block.id, is_error: true, content: 'query 不能为空' };
+        return { id: call.id, isError: true, content: 'query 不能为空' };
       }
       const hits = this.knowledge.search(query, 5).map((r) => r.article);
-      return {
-        type: 'tool_result',
-        tool_use_id: block.id,
-        content: hits.length ? formatArticles(hits) : '没有找到相关条目',
-      };
+      return { id: call.id, content: hits.length ? formatArticles(hits) : '没有找到相关条目' };
     }
-    return { type: 'tool_result', tool_use_id: block.id, is_error: true, content: `未知工具：${block.name}` };
+    return { id: call.id, isError: true, content: `未知工具：${call.name}` };
+  }
+
+  recordError(err) {
+    this.lastError = { message: describeError(err), at: Date.now() };
+    console.error('[ai]', this.lastError.message);
+    return this.lastError.message;
   }
 
   /**
@@ -259,45 +279,35 @@ class AiAssistant {
    * Never throws; API failures become a handoff and are recorded in lastError.
    */
   async respond(history, siteSettings) {
-    let request;
     try {
-      request = this.buildRequest(history, siteSettings);
+      const provider = this.provider();
+      const request = this.buildRequest(history, siteSettings, provider.supportsImages);
       // Only answer when the visitor has the last word: a request ending in an
-      // assistant turn would be a prefill, which current models reject.
+      // assistant turn would be a prefill, which many models reject.
       if (request.messages.at(-1)?.role !== 'user') return { action: 'none' };
-      return await this.runLoop(request);
+      return await this.runLoop(provider, request);
     } catch (err) {
-      this.lastError = { message: describeError(err), at: Date.now() };
-      console.error('[ai]', this.lastError.message);
-      return { action: 'handoff', reason: 'AI 服务暂时不可用', error: this.lastError.message };
+      return { action: 'handoff', reason: 'AI 服务暂时不可用', error: this.recordError(err) };
     }
   }
 
-  // A manual loop rather than the SDK tool runner: a transfer must end the
-  // turn immediately, and content after a refusal fallback needs filtering.
-  async runLoop({ system, tools, messages, retrieved }) {
-    const client = this.getClient();
+  // A manual loop rather than an SDK tool runner: a transfer must end the
+  // turn immediately, and the loop has to work for every provider.
+  async runLoop(provider, request) {
+    const { retrieved } = request;
+    const session = provider.createSession(request);
     const said = [];
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
-      const response = await client.beta.messages.create(this.requestParams({ system, tools, messages }));
-      if (response.stop_reason === 'refusal') {
-        return { action: 'handoff', reason: 'AI 无法处理该问题', retrieved };
-      }
-      const text = response.content
-        .filter((b) => b.type === 'text')
-        .map((b) => b.text)
-        .join('')
-        .trim();
-      if (text) said.push(text);
-      const toolUses = response.content.filter((b) => b.type === 'tool_use');
-      const transfer = toolUses.find((b) => b.name === 'transfer_to_human');
+      const turn = await session.send();
+      if (turn.stop === 'refusal') return { action: 'handoff', reason: 'AI 无法处理该问题', retrieved };
+      if (turn.text) said.push(turn.text);
+      const transfer = turn.toolCalls.find((c) => c.name === 'transfer_to_human');
       if (transfer) {
         const reason = typeof transfer.input?.reason === 'string' ? transfer.input.reason.slice(0, 200) : '';
         return { action: 'handoff', reason: reason || 'AI 判断需要人工处理', text: said.join('\n\n'), retrieved };
       }
-      if (response.stop_reason === 'tool_use' && toolUses.length) {
-        messages.push({ role: 'assistant', content: echoableContent(response.content) });
-        messages.push({ role: 'user', content: toolUses.map((b) => this.runTool(b)) });
+      if (turn.stop === 'tool') {
+        session.addToolResults(turn.toolCalls.map((c) => this.runTool(c)));
         continue;
       }
       this.lastError = null;
@@ -307,6 +317,31 @@ class AiAssistant {
     }
     return { action: 'handoff', reason: 'AI 多次检索仍未找到答案', text: said.join('\n\n'), retrieved };
   }
+
+  /** Sends a one-line request with the current connection to check it works. */
+  async ping() {
+    const started = Date.now();
+    try {
+      const session = this.provider().createSession({
+        stablePrompt: '这是一次 API 连接测试。',
+        dynamicPrompt: null,
+        tools: [],
+        messages: [{ role: 'user', parts: [{ type: 'text', text: '请只回复四个字：连接成功' }] }],
+      });
+      const turn = await session.send();
+      this.lastError = null;
+      return { ok: true, latency_ms: Date.now() - started, reply: turn.text.slice(0, 200) };
+    } catch (err) {
+      return { ok: false, latency_ms: Date.now() - started, error: this.recordError(err) };
+    }
+  }
 }
 
-module.exports = { AiAssistant, stablePrompt, echoableContent, TRANSFER_TOOL, SEARCH_TOOL };
+module.exports = {
+  AiAssistant,
+  stablePrompt,
+  echoableContent: anthropic.echoableContent,
+  TRANSFER_TOOL,
+  SEARCH_TOOL,
+  PROVIDERS,
+};

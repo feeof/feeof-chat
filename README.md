@@ -70,15 +70,24 @@ ADMIN_PASSWORD='你的强密码' npm start
 
 ## 开启 AI 智能客服
 
-1. 在 [Claude Console](https://platform.claude.com/) 创建 API Key，启动服务时通过环境变量传入：
-
-   ```bash
-   ANTHROPIC_API_KEY='sk-ant-...' npm start
-   ```
-
-2. 用管理员登录工作台，在「知识库」中新增条目或导入文档。一条只写一个主题，标题写成访客会问的样子，内容写清楚规则、步骤和例外情况。
+1. 用管理员登录工作台，打开「设置 → AI 接口」，填写接口类型、API 地址、API Key 和模型名称，点「保存并测试连接」确认可用（见下方「AI 接口」）。
+2. 在「知识库」中新增条目或导入文档。一条只写一个主题，标题写成访客会问的样子，内容写清楚规则、步骤和例外情况。
 3. 在「知识库」右侧的「试一试」中用访客的口吻提问，检查回答是否准确。
 4. 在「设置 → AI 智能客服」中勾选开启，选择接待模式，可以在「补充说明」里写上业务背景和语气要求。
+
+### AI 接口
+
+支持两种接口类型，在「设置 → AI 接口」中切换：
+
+| 接口类型 | 适用 | API 地址 | 模型名称示例 |
+| --- | --- | --- | --- |
+| Anthropic（Claude） | Claude 官方 API，或兼容 Anthropic Messages API 的代理 / 网关 | 留空即官方地址；代理填写其地址，如 `https://your-gateway.example.com` | `claude-opus-5-5`（默认）、`claude-sonnet-5-5`、`claude-haiku-5-5` |
+| OpenAI 兼容 | OpenAI、DeepSeek、通义千问（DashScope 兼容模式）、Kimi、智谱、本地 Ollama / vLLM 等 Chat Completions 接口 | 填写到 `/v1` 为止，如 `https://api.deepseek.com/v1`、`http://localhost:11434/v1`；也可以直接填完整的 `.../chat/completions` | 以服务商文档为准，如 `deepseek-chat`、`qwen-plus` |
+
+- **API Key** 只保存在服务器数据库里，页面上只显示前后几位；留空保存会保留原来的 Key。本地模型（如 Ollama）可以不填 Key。
+- **推理强度** 只对 Anthropic 接口有效，默认 `low`。所选 Claude 模型不支持 effort 参数时，选择“不指定”。
+- **OpenAI 兼容接口** 要求模型支持工具调用（function calling），AI 靠它转人工和检索知识库；模型支持图片输入时可勾选「模型支持图片输入」，访客发的截图会交给模型。部分推理模型输出的 `<think>…</think>` 思考内容会被自动去掉。
+- 也可以用环境变量设置默认值（见「配置」），后台保存的值优先。
 
 **工作方式**
 
@@ -86,7 +95,8 @@ ADMIN_PASSWORD='你的强密码' npm start
 - AI 回答不了、访客要求人工、问题需要人工处理，或者调用 Claude API 出错时，会话都会转入人工排队，按正常规则分配给客服
 - 同一会话中访客连续发多条消息时，AI 会等所有消息到齐后一次性回答
 - 每个会话最多由 AI 回复 30 次（可配置），超过后转人工，避免异常会话持续消耗费用
-- 默认使用 `claude-opus-5-5` 模型和 `low` 推理强度（聊天场景响应更快），并开启了 Claude API 的服务端拒答回退（`fallbacks: "default"`）：当模型的安全分类器误拦截一个问题时，会自动由另一个模型作答
+- 默认使用 Anthropic 接口的 `claude-opus-5-5` 模型和 `low` 推理强度（聊天场景响应更快）；直连 Claude 官方 API 时还会开启服务端拒答回退（`fallbacks: "default"`）：当模型的安全分类器误拦截一个问题时，会自动由另一个模型作答。通过代理访问时不发送这个参数
+- 知识库在 Anthropic 接口下使用提示缓存；OpenAI 兼容接口下，固定不变的指令和知识库放在最前面，便于支持自动前缀缓存的服务商命中缓存
 
 ## 嵌入到你的网站
 
@@ -117,13 +127,18 @@ ADMIN_PASSWORD='你的强密码' npm start
 | `ADMIN_PASSWORD` | 随机生成 | 初始管理员密码 |
 | `TRUST_PROXY` | 关闭 | 部署在 Nginx 等反向代理之后时设为 `1`，以便获取访客真实 IP |
 | `WIDGET_FRAME_ANCESTORS` | `*` | 允许嵌入聊天窗口的网站（CSP `frame-ancestors`），例如 `https://a.com https://b.com` |
-| `ANTHROPIC_API_KEY` | 无 | Claude API Key，未设置时 AI 客服不会启用 |
-| `AI_MODEL` | `claude-opus-5-5` | AI 使用的 Claude 模型 |
-| `AI_EFFORT` | `low` | 推理强度：`low` / `medium` / `high` / `xhigh` / `max`，越高回答越周全但越慢、越贵 |
+| `AI_PROVIDER` | `anthropic` | AI 接口类型的默认值：`anthropic` 或 `openai`（OpenAI 兼容） |
+| `AI_BASE_URL` | 官方地址 | AI 接口地址的默认值 |
+| `AI_API_KEY` | 无 | AI 接口 Key 的默认值；Anthropic 接口也会读取 `ANTHROPIC_API_KEY`，OpenAI 兼容接口也会读取 `OPENAI_API_KEY` |
+| `AI_MODEL` | `claude-opus-5-5`（Anthropic） | 模型名称的默认值 |
+| `AI_EFFORT` | `low` | 推理强度（仅 Anthropic）：`low` / `medium` / `high` / `xhigh` / `max`，`none` 表示不指定 |
+| `AI_VISION` | 关闭 | 设为 `1` 表示 OpenAI 兼容模型支持图片输入 |
 | `AI_MAX_TOKENS` | `8000` | 单次回复的最大 token 数（包含模型的思考过程） |
 | `AI_FULL_KB_MAX_CHARS` | `60000` | 知识库总字数不超过该值时全部交给 AI，超过则按问题检索 |
 | `AI_MAX_REPLIES` | `30` | 每个会话 AI 最多回复的次数，超过后转人工 |
-| `AI_FALLBACKS` | 开启 | 设为 `off` 关闭服务端拒答回退（通过不支持该参数的代理访问 API 时需要关闭） |
+| `AI_FALLBACKS` | 开启 | 设为 `off` 关闭服务端拒答回退（只在直连 Claude 官方 API 时生效） |
+
+> 「设置 → AI 接口」中保存的接口类型、地址、Key 和模型优先于这些环境变量。
 
 ## 部署
 
@@ -173,7 +188,8 @@ server/
   store.js        SQLite 数据访问
   db.js           数据库初始化与迁移
   realtime.js     Socket.IO 连接与在线状态
-  ai/             AI 客服：assistant.js（调用 Claude、转人工）、knowledge.js（知识库检索）
+  ai/             AI 客服：assistant.js（回答与转人工）、knowledge.js（知识库检索）
+    providers/    接口适配：anthropic.js（官方 SDK）、openai.js（OpenAI 兼容）
   routes/         REST 接口（auth、workspace、admin、knowledge、visitor、upload）
 public/
   widget.js       嵌入网站用的挂件脚本
@@ -198,13 +214,16 @@ test/             集成测试
 | GET | `/api/admin/stats?range=today\|7d\|30d` | 数据统计（管理员） |
 | GET / POST / PATCH / DELETE | `/api/admin/kb`、`/api/admin/kb/:id` | 知识库条目管理（管理员） |
 | POST | `/api/admin/kb/import` | 批量导入知识条目 |
-| POST | `/api/admin/ai/test` | 用一个问题测试 AI 回答（会调用 Claude API） |
+| POST | `/api/admin/ai/test` | 用一个问题测试 AI 回答（会调用 AI 接口） |
+| GET / PUT | `/api/admin/ai/connection` | 读取 / 保存 AI 接口设置（Key 只写不读） |
+| POST | `/api/admin/ai/ping` | 测试 AI 接口连接 |
 | POST | `/api/visitor/handoff` | 访客从 AI 转人工 |
 
 实时事件通过 Socket.IO 推送：`message`、`conversation:update`、`conversation`、`typing`、`agent:presence`、`service:status`。
 
 ## 安全说明
 
+- AI 接口的 API Key 保存在数据库中，接口只返回打码后的提示，普通客服无法读取；请妥善保管 `DATA_DIR`
 - 密码使用 scrypt 加盐哈希；登录失败限流；修改 / 重置密码后其他设备登录自动失效
 - 登录凭证与访客身份令牌在数据库中只保存 SHA-256 哈希
 - 所有用户输入均以纯文本渲染，链接只允许 http / https
