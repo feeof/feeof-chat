@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Feeof 在线客服</title>
+    <link rel="stylesheet" href="/home.css" />
+  </head>
+  <body>
+    <header class="top">
+      <div class="wrap top-inner">
+        <span class="brand">Feeof 在线客服</span>
+        <nav>
+          <a href="/chat.html" target="_blank" rel="noopener">独立聊天页</a>
+          <a class="btn" href="/agent/">进入客服工作台</a>
+        </nav>
+      </div>
+    </header>
+
+    <main class="wrap">
+      <section class="hero">
+        <h1>开箱即用的在线客服系统</h1>
+        <p>一行代码把客服挂件嵌入你的网站，访客实时咨询，客服在工作台统一接待。</p>
+        <div class="hero-actions">
+          <button type="button" class="btn" id="open-chat">试试联系客服</button>
+          <a class="btn btn-ghost" href="/agent/">以客服身份登录</a>
+        </div>
+        <p class="hint">提示：用两个浏览器窗口分别打开本页和客服工作台，即可体验完整的实时对话。</p>
+      </section>
+
+      <section class="grid">
+        <article>
+          <h2>访客挂件</h2>
+          <p>右下角悬浮按钮，支持文字、图片、粘贴截图、留下联系方式、结束会话后满意度评价，移动端自动全屏。</p>
+        </article>
+        <article>
+          <h2>智能分配</h2>
+          <p>按客服在线状态和当前负载自动分配会话，超出接待上限时自动排队；客服空闲后按先后顺序接入。</p>
+        </article>
+        <article>
+          <h2>客服工作台</h2>
+          <p>排队/进行中会话实时更新，输入状态提示、快捷回复、会话转接、访客信息与备注、桌面通知。</p>
+        </article>
+        <article>
+          <h2>管理后台</h2>
+          <p>客服账号管理、快捷回复维护、欢迎语与主题色设置、数据看板（响应时长、满意度、客服绩效）。</p>
+        </article>
+      </section>
+
+      <section class="embed">
+        <h2>嵌入到你的网站</h2>
+        <p>把下面这行代码放到网页的 <code>&lt;/body&gt;</code> 之前：</p>
+        <pre id="embed-code"></pre>
+      </section>
+    </main>
+
+    <footer class="wrap foot">Feeof Chat · 基于 Node.js + Socket.IO + SQLite</footer>
+
+    <script src="/home.js"></script>
+    <script src="/widget.js" async></script>
+  </body>
+</html>
