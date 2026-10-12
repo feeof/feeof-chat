@@ -4,10 +4,12 @@ const express = require('express');
 const { hashPassword } = require('../auth');
 const { badRequest, conflict, notFound, readString, readInt, readId } = require('../util');
 const { agentAuth, requireAdmin } = require('./middleware');
+const { knowledgeRoutes } = require('./knowledge');
 
 const USERNAME_RE = /^[A-Za-z0-9_.-]{3,32}$/;
 const COLOR_RE = /^#[0-9a-fA-F]{6}$/;
 const ROLES = ['admin', 'agent'];
+const AI_MODES = ['always', 'offline'];
 const RANGES = { today: 1, '7d': 7, '30d': 30 };
 
 function localDay(d) {
@@ -21,9 +23,11 @@ function readRole(value) {
   return value;
 }
 
-function adminRoutes({ store, service }) {
+function adminRoutes(deps) {
+  const { store, service } = deps;
   const router = express.Router();
   router.use(agentAuth(store), requireAdmin);
+  router.use(knowledgeRoutes(deps));
 
   // ---- agents ----
 
@@ -113,19 +117,30 @@ function adminRoutes({ store, service }) {
       theme_color: readString(body.theme_color, { field: '主题色', max: 7 }),
       auto_close_minutes: readInt(body.auto_close_minutes, { field: '自动结束时间', min: 0, max: 1440 }),
     };
+    Object.assign(patch, {
+      ai_name: readString(body.ai_name, { field: 'AI 客服名称', max: 20 }),
+      ai_instructions: readString(body.ai_instructions, { field: 'AI 补充说明', max: 4000 }),
+      ai_handoff_message: readString(body.ai_handoff_message, { field: '转人工提示', max: 200 }),
+    });
+    if (body.ai_mode !== undefined) {
+      if (!AI_MODES.includes(body.ai_mode)) throw badRequest('AI 接待模式无效');
+      patch.ai_mode = body.ai_mode;
+    }
     // Message texts may be cleared on purpose (an empty string disables that message).
-    for (const key of ['welcome_message', 'offline_message', 'queue_message']) {
+    for (const key of ['welcome_message', 'offline_message', 'queue_message', 'ai_instructions', 'ai_handoff_message']) {
       if (body[key] === '') patch[key] = '';
     }
     if (patch.theme_color !== undefined && !COLOR_RE.test(patch.theme_color)) {
       throw badRequest('主题色格式应为 #RRGGBB');
     }
-    if (body.auto_assign !== undefined) {
-      if (typeof body.auto_assign !== 'boolean') throw badRequest('auto_assign 必须是布尔值');
-      patch.auto_assign = body.auto_assign;
+    for (const key of ['auto_assign', 'ai_enabled']) {
+      if (body[key] === undefined) continue;
+      if (typeof body[key] !== 'boolean') throw badRequest(`${key} 必须是布尔值`);
+      patch[key] = body[key];
     }
+    const previous = store.getSettings();
     const settings = store.updateSettings(patch);
-    if (patch.auto_assign) service.drainQueue();
+    service.settingsChanged(previous, settings);
     res.json({ settings });
   });
 
