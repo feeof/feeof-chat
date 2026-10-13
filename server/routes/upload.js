@@ -4,6 +4,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const express = require('express');
+const busboy = require('busboy');
 const { hashToken } = require('../auth');
 const { HttpError, badRequest, RateLimiter } = require('../util');
 const { bearerToken } = require('./middleware');
@@ -21,9 +22,45 @@ function detectImageType(buf) {
   return null;
 }
 
+/**
+ * Reads the first file of a multipart/form-data body. Mini programs and the
+ * mobile app (uni.uploadFile) can only upload this way.
+ */
+function readMultipartFile(req, limit) {
+  return new Promise((resolve, reject) => {
+    let parser;
+    try {
+      parser = busboy({ headers: req.headers, limits: { files: 1, fileSize: limit, fields: 10, parts: 20 } });
+    } catch {
+      reject(badRequest('请求格式不正确'));
+      return;
+    }
+    let file = null;
+    let tooLarge = false;
+    parser.on('file', (name, stream) => {
+      const chunks = [];
+      stream.on('data', (chunk) => chunks.push(chunk));
+      stream.on('limit', () => {
+        tooLarge = true;
+      });
+      stream.on('end', () => {
+        file = Buffer.concat(chunks);
+      });
+    });
+    parser.on('error', () => reject(badRequest('请求格式不正确')));
+    parser.on('close', () => {
+      if (tooLarge) reject(new HttpError(413, '上传内容过大'));
+      else resolve(file);
+    });
+    req.pipe(parser);
+  });
+}
+
 function uploadRoutes({ store, config }) {
   const router = express.Router();
   const limiter = new RateLimiter({ limit: 20, windowMs: 60 * 1000 });
+  // The web pages send the image itself as the request body.
+  const rawBody = express.raw({ type: () => true, limit: config.maxUploadBytes });
   fs.mkdirSync(config.uploadsDir, { recursive: true });
 
   // Both agents (Bearer token) and visitors (X-Visitor-Token) may upload.
@@ -52,7 +89,13 @@ function uploadRoutes({ store, config }) {
       if (!limiter.hit(req.uploaderKey)) return next(new HttpError(429, '上传太频繁了，请稍后再试'));
       return next();
     },
-    express.raw({ type: () => true, limit: config.maxUploadBytes }),
+    (req, res, next) => {
+      if (!req.is('multipart/form-data')) return rawBody(req, res, next);
+      return readMultipartFile(req, config.maxUploadBytes).then((file) => {
+        req.body = file;
+        next();
+      }, next);
+    },
     (req, res) => {
       if (!Buffer.isBuffer(req.body) || req.body.length === 0) throw badRequest('请选择要上传的图片');
       const ext = detectImageType(req.body);

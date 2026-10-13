@@ -4,6 +4,7 @@
 
 - **后端**：Node.js 22 + Express 5 + Socket.IO，数据存储使用 Node 内置的 SQLite（`node:sqlite`），无需安装数据库
 - **前端**：原生 JavaScript（ES Modules），无需构建，支持浅色 / 深色模式和手机端
+- **手机 App**：uni-app（Vue 3），一套代码发布 Android / iOS App、微信小程序和 H5，见 [mobile/README.md](mobile/README.md)
 
 ## 功能
 
@@ -43,6 +44,13 @@
 - 快捷回复管理
 - 系统设置：站点名称、主题色、欢迎语、排队 / 离线提示、自动分配开关、无消息自动结束时间，以及嵌入代码
 
+**手机 App（客服 / 管理员）**
+
+- 客服工作台和管理后台的手机版：会话列表、聊天（文字 / 图片 / 快捷回复）、接入 / 接管 / 转接 / 结束、访客信息、历史会话、状态切换
+- 管理员可在手机上看数据看板，管理客服、知识库、快捷回复、系统设置和 AI 接口
+- 新会话、转人工、新消息振动提醒，断线自动重连
+- 发布为 Android / iOS App、微信小程序，或构建 H5 后由服务端托管在 `/m/`，详见 [mobile/README.md](mobile/README.md)
+
 ## 快速开始
 
 需要 Node.js **22.13 或更高版本**。
@@ -65,6 +73,7 @@ ADMIN_PASSWORD='你的强密码' npm start
 | http://localhost:3000/ | 演示页（已嵌入客服挂件） |
 | http://localhost:3000/agent/ | 客服工作台 / 管理后台 |
 | http://localhost:3000/chat.html | 独立聊天页（可直接作为客服链接分享） |
+| http://localhost:3000/m/ | 手机版工作台（需先在 `mobile/` 中执行 `npm install && npm run build:h5`） |
 
 体验完整流程：一个浏览器窗口登录客服工作台，另一个窗口（或无痕窗口）打开演示页点击“试试联系客服”。
 
@@ -127,6 +136,7 @@ ADMIN_PASSWORD='你的强密码' npm start
 | `ADMIN_PASSWORD` | 随机生成 | 初始管理员密码 |
 | `TRUST_PROXY` | 关闭 | 部署在 Nginx 等反向代理之后时设为 `1`，以便获取访客真实 IP |
 | `WIDGET_FRAME_ANCESTORS` | `*` | 允许嵌入聊天窗口的网站（CSP `frame-ancestors`），例如 `https://a.com https://b.com` |
+| `MOBILE_DIR` | `mobile/dist/build/h5` | 手机版 H5 构建目录，存在时托管在 `/m/` |
 | `AI_PROVIDER` | `anthropic` | AI 接口类型的默认值：`anthropic` 或 `openai`（OpenAI 兼容） |
 | `AI_BASE_URL` | 官方地址 | AI 接口地址的默认值 |
 | `AI_API_KEY` | 无 | AI 接口 Key 的默认值；Anthropic 接口也会读取 `ANTHROPIC_API_KEY`，OpenAI 兼容接口也会读取 `OPENAI_API_KEY` |
@@ -148,6 +158,8 @@ ADMIN_PASSWORD='你的强密码' npm start
 docker build -t feeof-chat .
 docker run -d -p 3000:3000 -v feeof-data:/app/data -e ADMIN_PASSWORD='你的强密码' feeof-chat
 ```
+
+镜像不包含手机版 H5；需要 `/m/` 时先在本机构建，再挂载进容器（见 [mobile/README.md](mobile/README.md)）。
 
 ### 反向代理（Nginx）
 
@@ -196,6 +208,7 @@ public/
   chat.html/js    访客聊天页面（挂件 iframe 内的页面）
   agent/          客服工作台与管理后台
   shared/         前端公共工具
+mobile/           手机 App（uni-app），见 mobile/README.md
 test/             集成测试
 ```
 
@@ -210,7 +223,7 @@ test/             集成测试
 | POST | `/api/conversations/:id/accept` / `transfer` / `close` | 接入 / 转接 / 结束 |
 | POST | `/api/visitor/session` | 访客建立或恢复身份（之后用 `X-Visitor-Token` 头） |
 | POST | `/api/visitor/messages` | 访客发送消息 |
-| POST | `/api/uploads` | 上传图片（PNG / JPG / GIF / WebP，最大 5MB） |
+| POST | `/api/uploads` | 上传图片（PNG / JPG / GIF / WebP，最大 5MB）；请求体直接是图片，或 `multipart/form-data`（App / 小程序） |
 | GET | `/api/admin/stats?range=today\|7d\|30d` | 数据统计（管理员） |
 | GET / POST / PATCH / DELETE | `/api/admin/kb`、`/api/admin/kb/:id` | 知识库条目管理（管理员） |
 | POST | `/api/admin/kb/import` | 批量导入知识条目 |
@@ -220,6 +233,8 @@ test/             集成测试
 | POST | `/api/visitor/handoff` | 访客从 AI 转人工 |
 
 实时事件通过 Socket.IO 推送：`message`、`conversation:update`、`conversation`、`typing`、`agent:presence`、`service:status`。
+
+不能发送 PATCH 的客户端（如微信小程序）可以用 `POST` 加请求头 `X-HTTP-Method-Override: PATCH` 代替。
 
 ## 安全说明
 
