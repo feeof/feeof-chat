@@ -17,6 +17,8 @@ function loadConfig(overrides = {}) {
     dbFile: path.join(dataDir, 'feeof-chat.db'),
     uploadsDir: path.join(dataDir, 'uploads'),
     publicDir: path.join(__dirname, '..', 'public'),
+    // H5 build of the mobile workspace (mobile/), served at /m/ once built.
+    mobileDir: process.env.MOBILE_DIR || path.join(__dirname, '..', 'mobile', 'dist', 'build', 'h5'),
     // Initial admin account, created only when the database has no users yet.
     adminUsername: process.env.ADMIN_USERNAME || 'admin',
     adminPassword: process.env.ADMIN_PASSWORD || '',

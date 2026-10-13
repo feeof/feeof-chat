@@ -41,6 +41,17 @@ function securityHeaders(config) {
   };
 }
 
+/**
+ * Mini programs cannot send PATCH requests, so the mobile app sends
+ * `POST` with `X-HTTP-Method-Override: PATCH` instead.
+ */
+function methodOverride(req, res, next) {
+  if (req.method === 'POST' && (req.get('x-http-method-override') || '').toUpperCase() === 'PATCH') {
+    req.method = 'PATCH';
+  }
+  next();
+}
+
 function errorHandler(err, req, res, next) {
   if (res.headersSent) return next(err);
   if (err instanceof HttpError) return res.status(err.status).json({ error: err.message });
@@ -85,6 +96,7 @@ function createApp({ aiClient, ...overrides } = {}) {
   app.disable('x-powered-by');
   app.set('trust proxy', config.trustProxy);
   app.use(securityHeaders(config));
+  app.use('/api', methodOverride);
 
   const deps = { store, service, config, ai, knowledge };
   // Knowledge base imports carry whole documents; everything else stays small.
@@ -111,6 +123,7 @@ function createApp({ aiClient, ...overrides } = {}) {
     }),
   );
   app.use(express.static(config.publicDir, { extensions: ['html'] }));
+  app.use('/m', express.static(config.mobileDir));
   app.use(errorHandler);
 
   const server = http.createServer(app);

@@ -228,6 +228,56 @@ test('image upload accepts real images only and serves them safely', async () =>
   assert.equal(agentUpload.status, 201);
 });
 
+test('POST with X-HTTP-Method-Override: PATCH works like PATCH (mini programs)', async () => {
+  const res = await srv.request('POST', '/api/auth/me', {
+    token: admin.token,
+    headers: { 'x-http-method-override': 'patch' },
+    body: { display_name: '超级管理员' },
+  });
+  assert.equal(res.status, 200);
+  assert.equal(res.data.user.display_name, '超级管理员');
+  const other = await srv.request('POST', '/api/auth/me', {
+    token: admin.token,
+    headers: { 'x-http-method-override': 'DELETE' },
+    body: {},
+  });
+  assert.equal(other.status, 404);
+  await srv.request('PATCH', '/api/auth/me', { token: admin.token, body: { display_name: '管理员' } });
+});
+
+test('image upload accepts multipart form data (mobile app and mini programs)', async () => {
+  const form = (blob) => {
+    const data = new FormData();
+    data.append('note', 'x');
+    data.append('file', blob, 'photo.png');
+    return data;
+  };
+  const upload = (body) => fetch(`${srv.base}/api/uploads`, { method: 'POST', headers: { authorization: `Bearer ${admin.token}` }, body });
+
+  const ok = await upload(form(new Blob([PNG_1PX], { type: 'image/png' })));
+  assert.equal(ok.status, 201);
+  const { url } = await ok.json();
+  assert.match(url, /^\/uploads\/[a-f0-9]{32}\.png$/);
+  assert.deepEqual(Buffer.from(await (await fetch(srv.base + url)).arrayBuffer()), PNG_1PX);
+
+  const fake = await upload(form(new Blob(['<svg onload="alert(1)"></svg>'], { type: 'image/png' })));
+  assert.equal(fake.status, 400);
+
+  const tooBig = await upload(form(new Blob([PNG_1PX, Buffer.alloc(6 * 1024 * 1024)], { type: 'image/png' })));
+  assert.equal(tooBig.status, 413);
+
+  const noFile = new FormData();
+  noFile.append('note', 'x');
+  assert.equal((await upload(noFile)).status, 400);
+
+  const broken = await fetch(`${srv.base}/api/uploads`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${admin.token}`, 'content-type': 'multipart/form-data' },
+    body: 'oops',
+  });
+  assert.equal(broken.status, 400);
+});
+
 test('settings and quick replies', async () => {
   const badColor = await srv.request('PUT', '/api/admin/settings', { token: admin.token, body: { theme_color: 'red' } });
   assert.equal(badColor.status, 400);
